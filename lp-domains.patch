@@ -1,165 +1,392 @@
-From 9875b80bfa6cf0cf6e9012ac4b2009fa444455f7 Mon Sep 17 00:00:00 2001
+From ee5f39c81b796d93e40b64f6dce7a0aa487000b3 Mon Sep 17 00:00:00 2001
 From: Grok <grok-export@users.noreply.github.com>
-Date: Mon, 21 Sep 2026 11:49:14 +0000
-Subject: [PATCH] Create LP domains with older cPanel APIs and attach proxy
- includes.
+Date: Mon, 21 Sep 2026 12:22:01 +0000
+Subject: [PATCH] Make LP photos full-width and fail loudly when Grok has no
+ API key.
 
-WHM create_addon_domain plus ensure_vhost_includes so cart.example.com hits Node instead of the empty docroot. Hide Perl traces in the dashboard.
+Hero and gallery images fill the phone column. Generate-from-photo reports missing XAI_API_KEY instead of silently using a template, and the key can be stored in Pengaturan.
 ---
- scripts/kaliaren-connect-domain.sh | 40 +++++++++++++----
- src/lib/cpanel.ts                  | 72 ++++++++++++++++++++++--------
- 2 files changed, 84 insertions(+), 28 deletions(-)
+ src/components/lp/lp-creative.tsx | 28 +++++------
+ src/lib/lp-fn.ts                  | 20 +++++++-
+ src/lib/settings-fn.ts            | 25 ++++++++++
+ src/lib/xai.ts                    | 78 +++++++++++++++++++------------
+ src/routes/pengaturan.tsx         | 49 ++++++++++++++++++-
+ src/routes/stok.$id.tsx           | 10 ++--
+ 6 files changed, 157 insertions(+), 53 deletions(-)
 
-diff --git a/scripts/kaliaren-connect-domain.sh b/scripts/kaliaren-connect-domain.sh
-index 31a3d87..21f5bea 100644
---- a/scripts/kaliaren-connect-domain.sh
-+++ b/scripts/kaliaren-connect-domain.sh
-@@ -1,6 +1,5 @@
- #!/bin/bash
--# Once on VPS: install to /usr/local/sbin/kaliaren-connect-domain
--# sudoers: dewastoreid ALL=(root) NOPASSWD: /usr/local/sbin/kaliaren-connect-domain
-+# Install once: /usr/local/sbin/kaliaren-connect-domain
- set -euo pipefail
- DOMAIN="${1:-}"
- USER="${KALIAREN_CPANEL_USER:-dewastoreid}"
-@@ -8,18 +7,41 @@ if [[ ! "$DOMAIN" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
-   echo "domain tidak valid" >&2
-   exit 1
- fi
--STD="/etc/apache2/conf.d/userdata/std/2_4/${USER}/${DOMAIN}"
--SSL="/etc/apache2/conf.d/userdata/ssl/2_4/${USER}/${DOMAIN}"
--mkdir -p "$STD" "$SSL"
--cat > "$STD/proxy.conf" <<'EOF'
-+SUB="${DOMAIN%%.*}"
-+SUB="${SUB//[^a-z0-9-]/}"
-+[[ -n "$SUB" ]] || SUB="lp"
-+DOC="/home/${USER}/public_html/${DOMAIN}"
-+
-+# Create the domain on the account if missing (cPanel UAPI modules vary by version).
-+uapi --user="$USER" Domain add_domain domain="$DOMAIN" >/tmp/kaliaren-uapi.log 2>&1 || true
-+uapi --user="$USER" Park park domain="$DOMAIN" >>/tmp/kaliaren-uapi.log 2>&1 || true
-+if command -v whmapi1 >/dev/null 2>&1; then
-+  whmapi1 create_addon_domain domain="$DOMAIN" subdomain="${SUB}" dir="$DOC" \
-+    >>/tmp/kaliaren-uapi.log 2>&1 || true
-+fi
-+mkdir -p "$DOC"
-+
-+write_proxy() {
-+  local dir="$1"
-+  mkdir -p "$dir"
-+  cat > "$dir/proxy.conf" <<'EOF'
- ProxyPreserveHost On
- RequestHeader set X-Forwarded-Proto "https"
- ProxyPass / http://127.0.0.1:3000/
- ProxyPassReverse / http://127.0.0.1:3000/
- EOF
--cp "$STD/proxy.conf" "$SSL/proxy.conf"
-+}
-+
-+STD="/etc/apache2/conf.d/userdata/std/2_4/${USER}/${DOMAIN}"
-+SSL="/etc/apache2/conf.d/userdata/ssl/2_4/${USER}/${DOMAIN}"
-+write_proxy "$STD"
-+write_proxy "$SSL"
-+
-+if [[ -x /scripts/ensure_vhost_includes ]]; then
-+  /scripts/ensure_vhost_includes --user="$USER" >/dev/null 2>&1 || true
-+fi
- if [[ -x /scripts/rebuildhttpdconf ]]; then
--  /scripts/rebuildhttpdconf >/dev/null
--  /scripts/restartsrv_httpd >/dev/null
-+  /scripts/rebuildhttpdconf
-+  /scripts/restartsrv_httpd
- fi
- echo "ok $DOMAIN"
-diff --git a/src/lib/cpanel.ts b/src/lib/cpanel.ts
-index b143d0b..910c10f 100644
---- a/src/lib/cpanel.ts
-+++ b/src/lib/cpanel.ts
-@@ -76,31 +76,65 @@ function namesOf(value: string[] | Record<string, string> | undefined): string[]
- }
+diff --git a/src/components/lp/lp-creative.tsx b/src/components/lp/lp-creative.tsx
+index 616e50d..3851e85 100644
+--- a/src/components/lp/lp-creative.tsx
++++ b/src/components/lp/lp-creative.tsx
+@@ -139,14 +139,16 @@ export function LpCreative({
+         </p>
  
- export async function cpanelListDomains(cfg: CpanelConfig): Promise<CpanelResult<string[]>> {
--  const res = await cpanelExecute<CpanelDomainList>(cfg, "Domain", "list_domains");
--  if (!res.ok || !res.data) return { ok: res.ok, data: [], error: res.error };
--  const list = [
--    res.data.main_domain ?? "",
--    ...namesOf(res.data.addon_domains),
--    ...(res.data.sub_domains ?? []),
--    ...(res.data.parked_domains ?? []),
--  ]
--    .map((s) => s.trim().toLowerCase())
--    .filter(Boolean);
--  return { ok: true, data: [...new Set(list)], error: "" };
-+  const attempts: Array<[string, string]> = [
-+    ["DomainInfo", "list_domains"],
-+    ["Domain", "list_domains"],
-+    ["DomainInfo", "domains_data"],
-+  ];
-+  let last = "cPanel list domain gagal";
-+  for (const [mod, fn] of attempts) {
-+    const res = await cpanelExecute<CpanelDomainList>(cfg, mod, fn);
-+    if (!res.ok || !res.data) {
-+      last = shortErr(res.error);
-+      continue;
+         {hero ? (
+-          <Photo
+-            src={hero}
+-            priority
+-            width={640}
+-            height={640}
+-            sizes="(max-width: 28rem) 100vw, 448px"
+-            className="mx-auto mt-3 max-h-72 w-auto object-contain"
+-          />
++          <div className="-mx-4 mt-3 bg-white">
++            <Photo
++              src={hero}
++              priority
++              width={720}
++              height={900}
++              sizes="(max-width: 28rem) 100vw, 448px"
++              className="block h-auto w-full object-contain"
++            />
++          </div>
+         ) : null}
+ 
+         <h1 className="mt-4 text-center text-[26px] leading-[1.15] font-black tracking-tight text-balance uppercase">
+@@ -181,15 +183,15 @@ export function LpCreative({
+         {thumbs.length ? (
+           <div className="mt-4 grid grid-cols-2 gap-2">
+             {thumbs.map((src, i) => (
+-              <figure key={src} className="overflow-hidden rounded-md bg-[#111]">
++              <figure key={src} className="overflow-hidden bg-white">
+                 <Photo
+                   src={src}
+-                  width={320}
+-                  height={220}
++                  width={360}
++                  height={360}
+                   sizes="(max-width: 28rem) 50vw, 200px"
+-                  className="aspect-[4/3] w-full object-cover"
++                  className="aspect-square w-full object-contain"
+                 />
+-                <figcaption className="px-2 py-1.5 text-center text-[11px] font-semibold text-white">
++                <figcaption className="px-2 py-1.5 text-center text-[11px] font-semibold text-[#111]">
+                   {i === 0 ? "Masalahnya" : "Pakai rutin"}
+                 </figcaption>
+               </figure>
+diff --git a/src/lib/lp-fn.ts b/src/lib/lp-fn.ts
+index 2e38cfd..2d450e6 100644
+--- a/src/lib/lp-fn.ts
++++ b/src/lib/lp-fn.ts
+@@ -22,6 +22,8 @@ import { grokExtremeCopy } from "@/lib/lp-ai";
+ import { parseMetaPixelId, parseTiktokPixelId } from "@/lib/lp-pixels";
+ import { resolveCdnBase } from "@/lib/settings-fn";
+ import { normalizeLpHost } from "@/lib/lp-domains";
++import { decryptSecret } from "@/lib/secret";
++import { resolveXaiKey, setXaiSettingsKey } from "@/lib/xai";
+ 
+ type LandingRow = {
+   id: number;
+@@ -496,7 +498,17 @@ export const createLanding = createServerFn({ method: "POST" })
+     const cost = parseMoney(product.cost_price);
+     const fallback = defaultLandingCopy(product.name, cost);
+     const first = photos[0];
+-    const ai = first?.data
++    if (!resolveXaiKey()) {
++      const stored = await sql.query<{ value: string }>(
++        `select value from app_settings where key = 'xai_key'`,
++      );
++      setXaiSettingsKey(decryptSecret(stored[0]?.value ?? ""));
 +    }
-+    const data = res.data as CpanelDomainList & { data?: CpanelDomainList };
-+    const block = data.main_domain ? data : data.data ?? data;
-+    const list = [
-+      block.main_domain ?? "",
-+      ...namesOf(block.addon_domains),
-+      ...(block.sub_domains ?? []),
-+      ...(block.parked_domains ?? []),
-+    ]
-+      .map((s) => s.trim().toLowerCase())
-+      .filter(Boolean);
-+    return { ok: true, data: [...new Set(list)], error: "" };
-+  }
-+  return { ok: false, data: [], error: last };
++    let aiError = "";
++    if (!resolveXaiKey()) {
++      aiError = "Kunci AI belum diisi. Buka Pengaturan → Kunci AI.";
++    }
++    const ai = !aiError && first?.data
+       ? await grokExtremeCopy({
+           name: product.name,
+           sku: product.sku,
+@@ -504,6 +516,9 @@ export const createLanding = createServerFn({ method: "POST" })
+           data: first.data,
+         })
+       : null;
++    if (!aiError && !ai) {
++      aiError = "Grok gagal baca foto. Cek log journalctl -u kaliaren | grep xai";
++    }
+     const copy = ai ? { ...fallback, ...ai } : fallback;
+     const source = ai ? ("grok" as const) : ("template" as const);
+ 
+@@ -558,6 +573,7 @@ export const createLanding = createServerFn({ method: "POST" })
+         slug: existing[0].slug,
+         reused: true as const,
+         source,
++        aiError,
+       };
+     }
+ 
+@@ -598,7 +614,7 @@ export const createLanding = createServerFn({ method: "POST" })
+     );
+     const id = inserted[0]?.id;
+     if (!id) throw new Error("Gagal membuat landing page");
+-    return { id, slug, reused: false as const, source };
++    return { id, slug, reused: false as const, source, aiError };
+   });
+ 
+ export const updateLanding = createServerFn({ method: "POST" })
+diff --git a/src/lib/settings-fn.ts b/src/lib/settings-fn.ts
+index 4d81a53..a0a2770 100644
+--- a/src/lib/settings-fn.ts
++++ b/src/lib/settings-fn.ts
+@@ -15,6 +15,7 @@ import {
+ import { assertActiveStaff } from "@/lib/staff-fn";
+ import { decryptSecret, encryptSecret } from "@/lib/secret";
+ import { cpanelAddDomain, cpanelDeleteDomain, cpanelListDomains } from "@/lib/cpanel";
++import { setXaiSettingsKey } from "@/lib/xai";
+ import { execFile } from "node:child_process";
+ import { promisify } from "node:util";
+ 
+@@ -364,3 +365,27 @@ export const removeLpDomain = createServerFn({ method: "POST" })
+     };
+   });
+ 
++export const getAiConfig = createServerFn({ method: "GET" })
++  .middleware([authMiddleware])
++  .handler(async ({ context }) => {
++    const profile = await assertActiveStaff(context.userId);
++    if (profile.role !== "admin") throw new Error("Hanya admin");
++    const env = Boolean(process.env.XAI_API_KEY?.trim());
++    const stored = Boolean(decryptSecret(await readSetting("xai_key")));
++    return { hasKey: env || stored, fromEnv: env };
++  });
++
++export const saveAiKey = createServerFn({ method: "POST" })
++  .middleware([authMiddleware])
++  .validator(z.object({ key: z.string().max(200) }))
++  .handler(async ({ data, context }) => {
++    const profile = await assertActiveStaff(context.userId);
++    if (profile.role !== "admin") throw new Error("Hanya admin");
++    const key = data.key.trim();
++    if (key) {
++      await writeSetting("xai_key", encryptSecret(key));
++      setXaiSettingsKey(key);
++    }
++    return { ok: true as const, hasKey: Boolean(key || process.env.XAI_API_KEY) };
++  });
++
+diff --git a/src/lib/xai.ts b/src/lib/xai.ts
+index a6ef934..cb9fdc9 100644
+--- a/src/lib/xai.ts
++++ b/src/lib/xai.ts
+@@ -8,6 +8,16 @@ export function xaiKey(): string | undefined {
+   return key || undefined;
  }
  
- export async function cpanelAddDomain(
-   cfg: CpanelConfig,
-   host: string,
- ): Promise<CpanelResult<unknown>> {
--  const added = await cpanelExecute(cfg, "Domain", "add_domain", { domain: host });
--  if (added.ok) return added;
--  const sub = host.split(".")[0] || "lp";
--  return cpanelExecute(cfg, "AddonDomain", "addaddondomain", {
--    newdomain: host,
--    subdomain: sub.replace(/[^a-z0-9-]/g, "").slice(0, 30) || "lp",
--    dir: `public_html/${host}`,
--  });
-+  const sub = (host.split(".")[0] || "lp").replace(/[^a-z0-9-]/g, "").slice(0, 30) || "lp";
-+  const attempts: Array<[string, string, Record<string, string>]> = [
-+    ["Domain", "add_domain", { domain: host }],
-+    ["Park", "park", { domain: host }],
-+    [
-+      "AddonDomain",
-+      "addaddondomain",
-+      { newdomain: host, subdomain: sub, dir: `public_html/${host}` },
-+    ],
-+    [
-+      "SubDomain",
-+      "addsubdomain",
-+      { domain: sub, rootdomain: host.split(".").slice(1).join("."), dir: `public_html/${host}` },
-+    ],
-+  ];
-+  let last = "cPanel tidak bisa membuat domain";
-+  for (const [mod, fn, params] of attempts) {
-+    const res = await cpanelExecute(cfg, mod, fn, params);
-+    if (res.ok) return res;
-+    last = shortErr(res.error);
-+  }
-+  return { ok: false, data: null, error: last };
++let settingsKey = "";
++
++export function setXaiSettingsKey(key: string) {
++  settingsKey = key.trim();
 +}
 +
-+function shortErr(raw: string): string {
-+  const line = raw.split("\n")[0]?.trim() ?? raw;
-+  if (line.length > 180) return `${line.slice(0, 177)}…`;
-+  return line;
- }
++export function resolveXaiKey(): string | undefined {
++  return xaiKey() || settingsKey || undefined;
++}
++
+ type ChatContent =
+   | string
+   | Array<
+@@ -21,7 +31,7 @@ export async function grokChat(opts: {
+   maxTokens?: number;
+   timeoutMs?: number;
+ }): Promise<string | null> {
+-  const apiKey = xaiKey();
++  const apiKey = resolveXaiKey();
+   if (!apiKey) {
+     console.error("[xai] no key");
+     return null;
+@@ -37,39 +47,45 @@ export async function grokChat(opts: {
+       ]
+     : opts.prompt;
  
- export async function cpanelDeleteDomain(
++  const models = ["grok-4-fast-reasoning", "grok-4.5"];
+   const ctrl = new AbortController();
+   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 60_000);
+   try {
+-    const res = await fetch(XAI_CHAT_URL, {
+-      method: "POST",
+-      signal: ctrl.signal,
+-      headers: {
+-        "Content-Type": "application/json",
+-        Authorization: `Bearer ${apiKey}`,
+-      },
+-      body: JSON.stringify({
+-        model: "grok-4.5",
+-        max_tokens: opts.maxTokens ?? 1800,
+-        temperature: 0.6,
+-        reasoning_effort: "low",
+-        response_format: { type: "json_object" },
+-        messages: [{ role: "user", content }],
+-      }),
+-    });
+-    if (!res.ok) {
+-      const errBody = await res.text().catch(() => "");
+-      console.error("[xai]", res.status, errBody.slice(0, 240));
+-      return null;
+-    }
+-    const body = (await res.json()) as {
+-      choices?: { message?: { content?: string }; finish_reason?: string }[];
+-    };
+-    const text = body.choices?.[0]?.message?.content?.trim() || "";
+-    if (!text) {
+-      console.error("[xai] empty", body.choices?.[0]?.finish_reason);
+-      return null;
++    let last = "";
++    for (const model of models) {
++      const res = await fetch(XAI_CHAT_URL, {
++        method: "POST",
++        signal: ctrl.signal,
++        headers: {
++          "Content-Type": "application/json",
++          Authorization: `Bearer ${apiKey}`,
++        },
++        body: JSON.stringify({
++          model,
++          max_tokens: opts.maxTokens ?? 1800,
++          temperature: 0.6,
++          reasoning_effort: "low",
++          response_format: { type: "json_object" },
++          messages: [{ role: "user", content }],
++        }),
++      });
++      if (!res.ok) {
++        last = `${model} ${res.status} ${(await res.text().catch(() => "")).slice(0, 180)}`;
++        console.error("[xai]", last);
++        continue;
++      }
++      const body = (await res.json()) as {
++        choices?: { message?: { content?: string }; finish_reason?: string }[];
++      };
++      const text = body.choices?.[0]?.message?.content?.trim() || "";
++      if (!text) {
++        last = `${model} empty ${body.choices?.[0]?.finish_reason ?? ""}`;
++        console.error("[xai]", last);
++        continue;
++      }
++      return text;
+     }
+-    return text;
++    return null;
+   } catch (err) {
+     console.error("[xai]", err instanceof Error ? err.name : "fail");
+     return null;
+@@ -83,7 +99,7 @@ export async function grokImagineEdit(opts: {
+   imageDataUrl: string;
+   timeoutMs?: number;
+ }): Promise<{ mime: string; data: string } | null> {
+-  const apiKey = xaiKey();
++  const apiKey = resolveXaiKey();
+   if (!apiKey) return null;
+   const ctrl = new AbortController();
+   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 90_000);
+diff --git a/src/routes/pengaturan.tsx b/src/routes/pengaturan.tsx
+index 91d28c0..57fda0c 100644
+--- a/src/routes/pengaturan.tsx
++++ b/src/routes/pengaturan.tsx
+@@ -11,10 +11,12 @@ import {
+ import {
+   connectLpDomain,
+   getCpanelConfig,
++  getAiConfig,
+   listLpDomains,
+   refreshLpDomain,
+   removeLpDomain,
+   saveCpanelConfig,
++  saveAiKey,
+   testCpanel,
+ } from "@/lib/settings-fn";
+ import { LP_A_RECORD_IP, type LpDomain } from "@/lib/lp-domains";
+@@ -41,6 +43,8 @@ function SettingsPage() {
+   const [cpanelOk, setCpanelOk] = useState<boolean | null>(null);
+   const [cpanelDomains, setCpanelDomains] = useState<string[]>([]);
+   const [cpanelError, setCpanelError] = useState("");
++  const [aiKey, setAiKey] = useState("");
++  const [hasAiKey, setHasAiKey] = useState(false);
+ 
+   function applyList(d: { primary: string; extra: LpDomain[] }) {
+     setPrimary(d.primary);
+@@ -48,12 +52,13 @@ function SettingsPage() {
+   }
+ 
+   useEffect(() => {
+-    Promise.all([listLpDomains(), getCpanelConfig()])
+-      .then(([domains, cfg]) => {
++    Promise.all([listLpDomains(), getCpanelConfig(), getAiConfig()])
++      .then(([domains, cfg, ai]) => {
+         applyList(domains);
+         setHost(cfg.host);
+         setUser(cfg.user);
+         setHasToken(cfg.hasToken);
++        setHasAiKey(ai.hasKey);
+       })
+       .catch((e: Error) => toast.error(e.message));
+   }, []);
+@@ -312,6 +317,46 @@ function SettingsPage() {
+               ) : null}
+             </CardContent>
+           </Card>
++
++          <Card>
++            <CardContent className="grid gap-3 p-5">
++              <div>
++                <p className="font-semibold">Kunci AI (Grok)</p>
++                <p className="text-sm text-muted">
++                  Untuk Generate LP dari foto. Tanpa kunci, LP hanya template.
++                </p>
++              </div>
++              <form
++                onSubmit={(e) => {
++                  e.preventDefault();
++                  if (!aiKey.trim()) return;
++                  setBusy(true);
++                  saveAiKey({ data: { key: aiKey } })
++                    .then((r) => {
++                      setHasAiKey(r.hasKey);
++                      setAiKey("");
++                      toast.success("Kunci AI disimpan");
++                    })
++                    .catch((err: Error) => toast.error(err.message))
++                    .finally(() => setBusy(false));
++                }}
++                className="grid gap-2"
++              >
++                <Input
++                  type="password"
++                  value={aiKey}
++                  onChange={(e) => setAiKey(e.target.value)}
++                  placeholder={hasAiKey ? "Tersimpan · isi untuk ganti" : "xai-..."}
++                />
++                <Button type="submit" disabled={busy || !aiKey.trim()}>
++                  Simpan kunci AI
++                </Button>
++              </form>
++              <p className={hasAiKey ? "text-xs text-ok" : "text-xs text-danger"}>
++                {hasAiKey ? "AI siap" : "AI belum aktif"}
++              </p>
++            </CardContent>
++          </Card>
+         </div>
+       </div>
+ 
+diff --git a/src/routes/stok.$id.tsx b/src/routes/stok.$id.tsx
+index aad1c8a..8d8c694 100644
+--- a/src/routes/stok.$id.tsx
++++ b/src/routes/stok.$id.tsx
+@@ -89,11 +89,11 @@ function ProductDetailPage() {
+         data: { productId: product.id, warehouseId },
+       });
+       setLanding({ id: created.id, slug: created.slug, isPublished: true });
+-      toast.success(
+-        created.source === "grok"
+-          ? "Grok baca foto. LP siap. Tempel form."
+-          : "LP jadi. Tempel form.",
+-      );
++      if (created.source === "grok") {
++        toast.success("Grok baca foto. LP siap. Tempel form.");
++      } else {
++        toast.error(created.aiError || "AI tidak jalan. LP pakai template.");
++      }
+       navigate({ to: "/lp/$id", params: { id: String(created.id) } });
+     } catch (err) {
+       toast.error(err instanceof Error ? err.message : "Gagal generate LP");
 -- 
 2.39.5
 
