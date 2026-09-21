@@ -1,5 +1,5 @@
 diff --git a/src/components/lp/landing-view.tsx b/src/components/lp/landing-view.tsx
-index 7b6f919..a33332b 100644
+index 7b6f919..3b77893 100644
 --- a/src/components/lp/landing-view.tsx
 +++ b/src/components/lp/landing-view.tsx
 @@ -18,6 +18,20 @@ function FormBlock({
@@ -23,18 +23,40 @@ index 7b6f919..a33332b 100644
    return (
      <div
        id="pesan"
-@@ -64,22 +78,33 @@ export function LandingView({
+@@ -37,7 +51,7 @@ export function LandingView({
+ }) {
+   if (embedFormOnly) {
+     return (
+-      <div className="lp mx-auto min-h-dvh max-w-md bg-white px-5 py-6 text-[#111]">
++      <div className="lp mx-auto min-h-dvh w-full max-w-md min-w-0 overflow-x-hidden bg-white px-5 py-6 text-[#111]">
+         <AdPixels
+           metaPixelId={page.metaPixelId}
+           tiktokPixelId={page.tiktokPixelId}
+@@ -56,7 +70,7 @@ export function LandingView({
+   }
+ 
+   return (
+-    <main className="flex min-h-dvh w-full justify-center bg-[#111] text-[#111]">
++    <main className="flex min-h-dvh w-full max-w-full justify-center overflow-x-hidden bg-[#111] text-[#111]">
+       <AdPixels
+         metaPixelId={page.metaPixelId}
+         tiktokPixelId={page.tiktokPixelId}
+@@ -64,22 +78,35 @@ export function LandingView({
          productName={page.productName}
          price={page.price}
        />
 -      <div className={`lp w-full max-w-md bg-white ${page.embed ? "pb-24" : ""}`}>
 -        <LpCreative page={page} form={<FormBlock page={page} />} />
 -        {page.embed ? (
-+      <div className={`lp w-full max-w-md bg-white ${page.embed || page.checkoutUrl ? "pb-24" : ""}`}>
+-          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-black/10 bg-white/95 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm">
+-            <div className="mx-auto flex max-w-md items-center gap-3">
++      <div
++        className={`lp w-full min-w-0 max-w-md overflow-x-hidden bg-white ${page.embed || page.checkoutUrl ? "pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))]" : ""}`}
++      >
 +        <LpCreative page={page} form={page.checkoutUrl ? null : <FormBlock page={page} />} />
 +        {page.embed || page.checkoutUrl ? (
-           <div className="fixed inset-x-0 bottom-0 z-40 border-t border-black/10 bg-white/95 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm">
-             <div className="mx-auto flex max-w-md items-center gap-3">
++          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-black/10 bg-white/95 px-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm">
++            <div className="mx-auto flex w-full max-w-md min-w-0 items-center gap-3">
                <div className="min-w-0 flex-1">
                  <p className="truncate text-sm text-[#666]">{page.productName}</p>
                  <p className="font-bold tabular-nums text-[#e11d2e]">{rupiah(page.price)}</p>
@@ -51,7 +73,7 @@ index 7b6f919..a33332b 100644
 +                  href={page.checkoutUrl}
 +                  rel="noopener noreferrer"
 +                  onClick={() => trackLpCheckout()}
-+                  className="grid h-12 shrink-0 place-items-center rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
++                  className="grid h-12 min-h-11 min-w-28 shrink-0 place-items-center rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
 +                >
 +                  {page.ctaPrimary || "PESAN"}
 +                </a>
@@ -59,7 +81,7 @@ index 7b6f919..a33332b 100644
 +                <button
 +                  type="button"
 +                  onClick={scrollToForm}
-+                  className="h-12 shrink-0 rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
++                  className="h-12 min-h-11 min-w-28 shrink-0 rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
 +                >
 +                  {page.ctaPrimary || "PESAN"}
 +                </button>
@@ -68,7 +90,7 @@ index 7b6f919..a33332b 100644
            </div>
          ) : null}
 diff --git a/src/components/lp/lp-creative.tsx b/src/components/lp/lp-creative.tsx
-index 616e50d..f363a31 100644
+index 616e50d..ec75ca9 100644
 --- a/src/components/lp/lp-creative.tsx
 +++ b/src/components/lp/lp-creative.tsx
 @@ -38,16 +38,38 @@ function scrollToForm() {
@@ -91,7 +113,7 @@ index 616e50d..f363a31 100644
 +  pulse?: boolean;
 +  href?: string;
 +}) {
-+  const className = `flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#e11d2e] text-[15px] font-bold tracking-wide text-white uppercase ${pulse ? "cta-pulse" : ""}`;
++  const className = `flex h-12 min-h-11 w-full items-center justify-center gap-2 rounded-full bg-[#e11d2e] text-[15px] font-bold tracking-wide text-white uppercase ${pulse ? "cta-pulse" : ""}`;
 +  const inner = (
 +    <>
        <ShoppingCart className="size-5" />
@@ -171,6 +193,15 @@ index 616e50d..f363a31 100644
                    {i === 0 ? "Masalahnya" : "Pakai rutin"}
                  </figcaption>
                </figure>
+@@ -200,7 +224,7 @@ export function LpCreative({
+ 
+       <section className="px-4 py-6">
+         <SectionTitle>Kenapa banyak dipilih?</SectionTitle>
+-        <ul className="mt-5 grid grid-cols-4 gap-2">
++        <ul className="mt-5 grid grid-cols-2 gap-2 min-[380px]:grid-cols-4">
+           {benefits.map((item, i) => {
+             const Icon = WHY_ICONS[i] ?? Sparkles;
+             return (
 @@ -334,7 +358,7 @@ export function LpCreative({
            Jangan cuma lihat-lihat. Selagi ready, langsung checkout.
          </p>
@@ -489,6 +520,19 @@ index a6ef934..cb9fdc9 100644
    if (!apiKey) return null;
    const ctrl = new AbortController();
    const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 90_000);
+diff --git a/src/routes/__root.tsx b/src/routes/__root.tsx
+index 0423750..73b8372 100644
+--- a/src/routes/__root.tsx
++++ b/src/routes/__root.tsx
+@@ -28,7 +28,7 @@ export const Route = createRootRoute({
+   head: () => ({
+     meta: [
+       { charSet: "utf-8" },
+-      { name: "viewport", content: "width=device-width, initial-scale=1" },
++      { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
+       { title: APP_NAME },
+       {
+         name: "description",
 diff --git a/src/routes/lp.$id.tsx b/src/routes/lp.$id.tsx
 index ef73c54..f33beba 100644
 --- a/src/routes/lp.$id.tsx
@@ -561,6 +605,23 @@ index ef73c54..f33beba 100644
            </p>
          )}
        </fieldset>
+diff --git a/src/routes/p.$slug.tsx b/src/routes/p.$slug.tsx
+index 3070551..00fcb05 100644
+--- a/src/routes/p.$slug.tsx
++++ b/src/routes/p.$slug.tsx
+@@ -28,6 +28,12 @@ export const Route = createFileRoute("/p/$slug")({
+         name: "description",
+         content: loaderData ? lpPunch(loaderData) : "Pesan COD dari gudang Kaliaren.",
+       },
++      {
++        name: "viewport",
++        content: "width=device-width, initial-scale=1, viewport-fit=cover",
++      },
++      { name: "format-detection", content: "telephone=no" },
++      { name: "theme-color", content: "#ffffff" },
+     ],
+     links: [
+       ...(hero
 diff --git a/src/routes/pengaturan.tsx b/src/routes/pengaturan.tsx
 index 91d28c0..57fda0c 100644
 --- a/src/routes/pengaturan.tsx
@@ -671,3 +732,54 @@ index aad1c8a..8d8c694 100644
        navigate({ to: "/lp/$id", params: { id: String(created.id) } });
      } catch (err) {
        toast.error(err instanceof Error ? err.message : "Gagal generate LP");
+diff --git a/src/styles.css b/src/styles.css
+index c88a040..0a51b21 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -113,15 +113,46 @@
+ 
+ .lp .ooef {
+   min-height: 22rem;
++  max-width: 100%;
+ }
+ 
+ .lp-creative {
+   width: 100%;
++  max-width: 100%;
+   background: #fff;
+ }
+ 
+ .lp {
++  width: 100%;
++  max-width: 28rem;
++  overflow-x: hidden;
+   background: #fff;
++  -webkit-text-size-adjust: 100%;
++  text-size-adjust: 100%;
++}
++
++html:has(.lp),
++body:has(.lp) {
++  overflow-x: hidden;
++  max-width: 100%;
++}
++
++.lp img {
++  max-width: 100%;
++  height: auto;
++}
++
++.lp a,
++.lp button {
++  touch-action: manipulation;
++  -webkit-tap-highlight-color: transparent;
++}
++
++.lp .ooef input,
++.lp .ooef textarea,
++.lp .ooef select {
++  font-size: 16px !important;
++  max-width: 100%;
+ }
+ 
+ .lp-creative .cta-pulse {
