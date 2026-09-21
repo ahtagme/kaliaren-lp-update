@@ -1,235 +1,479 @@
-From f0847d671e46b1c02b45e08d6814c80af8b0a8db Mon Sep 17 00:00:00 2001
+From de22469a1f733dcff0b79b5082ba965b619d16b0 Mon Sep 17 00:00:00 2001
 From: Grok <grok-export@users.noreply.github.com>
-Date: Mon, 21 Sep 2026 11:04:08 +0000
-Subject: [PATCH] Verify ad domains via DNS before marking them active.
+Date: Mon, 21 Sep 2026 11:42:16 +0000
+Subject: [PATCH] Connect LP domains from the dashboard via cPanel API.
 
-Adding a hostname looks up its A record against the VPS IP. Success only if DNS already points here; otherwise show the exact record to fix.
+Admin stores the cPanel token on the server, tests the connection, and adds a hostname. DNS is verified (including Cloudflare proxy) and Apache proxy is applied by a one-time root helper so WHM is not needed for every domain.
 ---
- src/lib/lp-domains.ts   |  35 ++++++++-
- src/lib/settings-fn.ts  | 156 +++++++++++++++++++++++++++++++++++++---
- src/routes/lp.index.tsx | 115 ++++++++++++++++++++++-------
- 3 files changed, 265 insertions(+), 41 deletions(-)
+ scripts/kaliaren-connect-domain.sh |  25 +++
+ src/components/app-shell.tsx       |  24 +++
+ src/lib/cpanel.ts                  | 116 ++++++++++
+ src/lib/lp-domains.ts              |  29 +++
+ src/lib/secret.ts                  |  27 +++
+ src/lib/settings-fn.ts             | 140 +++++++++++-
+ src/routes/lp.index.tsx            |   7 +-
+ src/routes/pengaturan.tsx          | 327 +++++++++++++++++++++++++++++
+ 8 files changed, 691 insertions(+), 4 deletions(-)
+ create mode 100644 scripts/kaliaren-connect-domain.sh
+ create mode 100644 src/lib/cpanel.ts
+ create mode 100644 src/lib/secret.ts
+ create mode 100644 src/routes/pengaturan.tsx
 
-diff --git a/src/lib/lp-domains.ts b/src/lib/lp-domains.ts
-index a613dcd..35d00e7 100644
---- a/src/lib/lp-domains.ts
-+++ b/src/lib/lp-domains.ts
-@@ -1,3 +1,11 @@
-+export type LpDomainStatus = "active" | "pending" | "invalid";
-+
-+export type LpDomain = {
+diff --git a/scripts/kaliaren-connect-domain.sh b/scripts/kaliaren-connect-domain.sh
+new file mode 100644
+index 0000000..31a3d87
+--- /dev/null
++++ b/scripts/kaliaren-connect-domain.sh
+@@ -0,0 +1,25 @@
++#!/bin/bash
++# Once on VPS: install to /usr/local/sbin/kaliaren-connect-domain
++# sudoers: dewastoreid ALL=(root) NOPASSWD: /usr/local/sbin/kaliaren-connect-domain
++set -euo pipefail
++DOMAIN="${1:-}"
++USER="${KALIAREN_CPANEL_USER:-dewastoreid}"
++if [[ ! "$DOMAIN" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
++  echo "domain tidak valid" >&2
++  exit 1
++fi
++STD="/etc/apache2/conf.d/userdata/std/2_4/${USER}/${DOMAIN}"
++SSL="/etc/apache2/conf.d/userdata/ssl/2_4/${USER}/${DOMAIN}"
++mkdir -p "$STD" "$SSL"
++cat > "$STD/proxy.conf" <<'EOF'
++ProxyPreserveHost On
++RequestHeader set X-Forwarded-Proto "https"
++ProxyPass / http://127.0.0.1:3000/
++ProxyPassReverse / http://127.0.0.1:3000/
++EOF
++cp "$STD/proxy.conf" "$SSL/proxy.conf"
++if [[ -x /scripts/rebuildhttpdconf ]]; then
++  /scripts/rebuildhttpdconf >/dev/null
++  /scripts/restartsrv_httpd >/dev/null
++fi
++echo "ok $DOMAIN"
+diff --git a/src/components/app-shell.tsx b/src/components/app-shell.tsx
+index 71ad306..2f254e6 100644
+--- a/src/components/app-shell.tsx
++++ b/src/components/app-shell.tsx
+@@ -11,6 +11,7 @@ import {
+   Users,
+   Megaphone,
+   ShoppingBag,
++  Settings,
+ } from "lucide-react";
+ import { useEffect, useState, type ReactNode } from "react";
+ import { pickWarehouse, useWarehouseStore } from "@/lib/warehouse-store";
+@@ -209,6 +210,7 @@ function StaffShell({
+               );
+             })}
+             {showUsers ? (
++              <>
+               <Link
+                 to="/pengguna"
+                 className={cn(
+@@ -221,6 +223,19 @@ function StaffShell({
+                 <Users className="size-4" />
+                 Pengguna
+               </Link>
++              <Link
++                to="/pengaturan"
++                className={cn(
++                  "flex h-11 items-center gap-3 rounded-md px-3 text-sm font-medium transition-colors duration-150",
++                  pathname.startsWith("/pengaturan")
++                    ? "bg-primary-fg/12 text-primary-fg"
++                    : "text-ink-fg/70 hover:bg-primary-fg/8 hover:text-ink-fg",
++                )}
++              >
++                <Settings className="size-4" />
++                Pengaturan
++              </Link>
++              </>
+             ) : null}
+           </nav>
+           <div className="px-4 py-4 text-xs text-ink-fg/80">
+@@ -290,6 +305,15 @@ function StaffShell({
+                   <Users className="size-4" />
+                 </Link>
+               ) : null}
++              {showUsers ? (
++                <Link
++                  to="/pengaturan"
++                  className="inline-flex size-11 items-center justify-center rounded-md bg-surface text-fg shadow-[var(--shadow-border)] lg:hidden"
++                  aria-label="Pengaturan"
++                >
++                  <Settings className="size-4" />
++                </Link>
++              ) : null}
+               <div className="lg:hidden">
+                 <UserButton />
+               </div>
+diff --git a/src/lib/cpanel.ts b/src/lib/cpanel.ts
+new file mode 100644
+index 0000000..b143d0b
+--- /dev/null
++++ b/src/lib/cpanel.ts
+@@ -0,0 +1,116 @@
++export type CpanelConfig = {
 +  host: string;
-+  status: LpDomainStatus;
-+  detail: string;
++  user: string;
++  token: string;
 +};
 +
- export function normalizeLpHost(raw: string): string {
-   let s = raw.trim().toLowerCase();
-   s = s.replace(/^https?:\/\//, "");
-@@ -13,16 +21,35 @@ export function normalizeLpHost(raw: string): string {
- }
- 
- export function parseLpDomains(raw: string): string[] {
-+  return parseLpDomainRecords(raw).map((d) => d.host);
++export type CpanelResult<T> = {
++  ok: boolean;
++  data: T | null;
++  error: string;
++};
++
++function apiOrigin(host: string): string {
++  const h = host.replace(/^https?:\/\//, "").replace(/\/$/, "");
++  if (h.includes(":")) return `https://${h}`;
++  return `https://${h}:2083`;
 +}
 +
-+export function parseLpDomainRecords(raw: string): LpDomain[] {
-   try {
-     const parsed = JSON.parse(raw) as unknown;
-     if (!Array.isArray(parsed)) return [];
-     const seen = new Set<string>();
--    const out: string[] = [];
-+    const out: LpDomain[] = [];
-     for (const item of parsed) {
--      const host = normalizeLpHost(String(item ?? ""));
-+      if (typeof item === "string") {
-+        const host = normalizeLpHost(item);
-+        if (!host || seen.has(host)) continue;
-+        seen.add(host);
-+        out.push({ host, status: "pending", detail: "Belum dicek" });
-+        continue;
-+      }
-+      if (!item || typeof item !== "object") continue;
-+      const rec = item as Partial<LpDomain>;
-+      const host = normalizeLpHost(String(rec.host ?? ""));
-       if (!host || seen.has(host)) continue;
-       seen.add(host);
--      out.push(host);
-+      const status: LpDomainStatus =
-+        rec.status === "active" || rec.status === "invalid" ? rec.status : "pending";
-+      out.push({
-+        host,
-+        status,
-+        detail: String(rec.detail ?? "").slice(0, 200),
-+      });
-     }
-     return out;
-   } catch {
-@@ -48,3 +75,5 @@ export function mergeDomainChoices(primary: string, extra: string[]): string[] {
-   }
-   return out;
- }
-+
-+export const LP_A_RECORD_IP = "45.76.179.245";
-diff --git a/src/lib/settings-fn.ts b/src/lib/settings-fn.ts
-index 26de9ae..334340f 100644
---- a/src/lib/settings-fn.ts
-+++ b/src/lib/settings-fn.ts
-@@ -1,9 +1,16 @@
- import { createServerFn } from "@tanstack/react-start";
-+import { Resolver } from "node:dns/promises";
- import { z } from "zod";
- import { getSql } from "@/lib/db";
- import { authMiddleware } from "@/lib/auth/middleware";
- import { parseCdnBase, publicOrigin } from "@/lib/cdn";
--import { mergeDomainChoices, normalizeLpHost, parseLpDomains } from "@/lib/lp-domains";
-+import {
-+  LP_A_RECORD_IP,
-+  mergeDomainChoices,
-+  normalizeLpHost,
-+  parseLpDomainRecords,
-+  type LpDomain,
-+} from "@/lib/lp-domains";
- import { assertActiveStaff } from "@/lib/staff-fn";
- 
- async function readSetting(key: string): Promise<string> {
-@@ -27,6 +34,64 @@ function primaryHost(): string {
-   return normalizeLpHost(publicOrigin()) || "store.ahtagroup.com";
- }
- 
-+async function writeDomains(records: LpDomain[]): Promise<void> {
-+  const sql = await getSql();
-+  await sql.query(
-+    `insert into app_settings (key, value, updated_at)
-+     values ('lp_domains', $1, now())
-+     on conflict (key) do update set value = excluded.value, updated_at = now()`,
-+    [JSON.stringify(records)],
-+  );
-+}
-+
-+async function resolveIps(host: string): Promise<string[]> {
-+  const resolver = new Resolver();
-+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
-+  const timer = setTimeout(() => resolver.cancel(), 4000);
++export async function cpanelExecute<T = unknown>(
++  cfg: CpanelConfig,
++  module: string,
++  func: string,
++  params: Record<string, string> = {},
++): Promise<CpanelResult<T>> {
++  if (!cfg.host || !cfg.user || !cfg.token) {
++    return { ok: false, data: null, error: "cPanel belum dikonfigurasi" };
++  }
++  const url = new URL(`${apiOrigin(cfg.host)}/execute/${module}/${func}`);
++  const body = new URLSearchParams(params);
++  const ctrl = new AbortController();
++  const timer = setTimeout(() => ctrl.abort(), 15000);
 +  try {
-+    const ips = await resolver.resolve4(host);
-+    return [...new Set(ips)];
++    const res = await fetch(url, {
++      method: "POST",
++      headers: {
++        Authorization: `cpanel ${cfg.user}:${cfg.token}`,
++        "Content-Type": "application/x-www-form-urlencoded",
++      },
++      body,
++      signal: ctrl.signal,
++    });
++    const json = (await res.json()) as {
++      status?: number | boolean;
++      errors?: string[] | null;
++      messages?: string[] | null;
++      data?: T;
++    };
++    const ok = json.status === 1 || json.status === true;
++    if (!ok) {
++      const err =
++        (json.errors && json.errors.filter(Boolean).join(" ")) ||
++        `cPanel ${module}::${func} gagal (${res.status})`;
++      return { ok: false, data: json.data ?? null, error: err };
++    }
++    return { ok: true, data: json.data ?? null, error: "" };
 +  } catch (err) {
-+    const code = (err as NodeJS.ErrnoException).code;
-+    if (code === "ENOTFOUND" || code === "ENODATA" || code === "CANCELLED") return [];
-+    return [];
++    const msg = err instanceof Error ? err.message : "Gagal hubungi cPanel";
++    if (msg.includes("abort")) return { ok: false, data: null, error: "cPanel timeout" };
++    return { ok: false, data: null, error: msg };
 +  } finally {
 +    clearTimeout(timer);
 +  }
 +}
 +
-+async function expectedIps(): Promise<string[]> {
-+  const primary = primaryHost();
-+  const ips = primary ? await resolveIps(primary) : [];
-+  if (!ips.includes(LP_A_RECORD_IP)) ips.push(LP_A_RECORD_IP);
-+  return ips;
++export type CpanelDomainList = {
++  main_domain?: string;
++  addon_domains?: string[] | Record<string, string>;
++  sub_domains?: string[];
++  parked_domains?: string[];
++};
++
++function namesOf(value: string[] | Record<string, string> | undefined): string[] {
++  if (!value) return [];
++  if (Array.isArray(value)) return value;
++  return Object.keys(value);
 +}
 +
-+async function verifyHost(host: string): Promise<LpDomain> {
-+  const ips = await resolveIps(host);
-+  if (ips.length === 0) {
-+    return {
-+      host,
-+      status: "invalid",
-+      detail: `Domain tidak ketemu di DNS. Pasang A record ke ${LP_A_RECORD_IP}`,
-+    };
++export async function cpanelListDomains(cfg: CpanelConfig): Promise<CpanelResult<string[]>> {
++  const res = await cpanelExecute<CpanelDomainList>(cfg, "Domain", "list_domains");
++  if (!res.ok || !res.data) return { ok: res.ok, data: [], error: res.error };
++  const list = [
++    res.data.main_domain ?? "",
++    ...namesOf(res.data.addon_domains),
++    ...(res.data.sub_domains ?? []),
++    ...(res.data.parked_domains ?? []),
++  ]
++    .map((s) => s.trim().toLowerCase())
++    .filter(Boolean);
++  return { ok: true, data: [...new Set(list)], error: "" };
++}
++
++export async function cpanelAddDomain(
++  cfg: CpanelConfig,
++  host: string,
++): Promise<CpanelResult<unknown>> {
++  const added = await cpanelExecute(cfg, "Domain", "add_domain", { domain: host });
++  if (added.ok) return added;
++  const sub = host.split(".")[0] || "lp";
++  return cpanelExecute(cfg, "AddonDomain", "addaddondomain", {
++    newdomain: host,
++    subdomain: sub.replace(/[^a-z0-9-]/g, "").slice(0, 30) || "lp",
++    dir: `public_html/${host}`,
++  });
++}
++
++export async function cpanelDeleteDomain(
++  cfg: CpanelConfig,
++  host: string,
++): Promise<CpanelResult<unknown>> {
++  const del = await cpanelExecute(cfg, "Domain", "delete", { domain: host });
++  if (del.ok) return del;
++  return cpanelExecute(cfg, "AddonDomain", "deladdondomain", {
++    domain: host,
++    subdomain: host.split(".")[0] || "lp",
++  });
++}
+diff --git a/src/lib/lp-domains.ts b/src/lib/lp-domains.ts
+index 35d00e7..ee993de 100644
+--- a/src/lib/lp-domains.ts
++++ b/src/lib/lp-domains.ts
+@@ -77,3 +77,32 @@ export function mergeDomainChoices(primary: string, extra: string[]): string[] {
+ }
+ 
+ export const LP_A_RECORD_IP = "45.76.179.245";
++
++function ip4ToInt(ip: string): number | null {
++  const p = ip.split(".").map((n) => Number(n));
++  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
++  return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
++}
++
++const CF_RANGES: Array<[number, number]> = [
++  [ip4ToInt("104.16.0.0")!, ip4ToInt("104.31.255.255")!],
++  [ip4ToInt("172.64.0.0")!, ip4ToInt("172.71.255.255")!],
++  [ip4ToInt("173.245.48.0")!, ip4ToInt("173.245.63.255")!],
++  [ip4ToInt("103.21.244.0")!, ip4ToInt("103.21.247.255")!],
++  [ip4ToInt("103.22.200.0")!, ip4ToInt("103.22.203.255")!],
++  [ip4ToInt("103.31.4.0")!, ip4ToInt("103.31.7.255")!],
++  [ip4ToInt("141.101.64.0")!, ip4ToInt("141.101.127.255")!],
++  [ip4ToInt("108.162.192.0")!, ip4ToInt("108.162.255.255")!],
++  [ip4ToInt("190.93.240.0")!, ip4ToInt("190.93.255.255")!],
++  [ip4ToInt("188.114.96.0")!, ip4ToInt("188.114.111.255")!],
++  [ip4ToInt("197.234.240.0")!, ip4ToInt("197.234.243.255")!],
++  [ip4ToInt("198.41.128.0")!, ip4ToInt("198.41.255.255")!],
++  [ip4ToInt("162.158.0.0")!, ip4ToInt("162.159.255.255")!],
++];
++
++export function isCloudflareIp(ip: string): boolean {
++  const n = ip4ToInt(ip);
++  if (n == null) return false;
++  return CF_RANGES.some(([a, b]) => n >= a && n <= b);
++}
++
+diff --git a/src/lib/secret.ts b/src/lib/secret.ts
+new file mode 100644
+index 0000000..68af9c2
+--- /dev/null
++++ b/src/lib/secret.ts
+@@ -0,0 +1,27 @@
++import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
++
++function key(): Buffer {
++  const secret = process.env.BETTER_AUTH_SECRET?.trim() || "kaliaren-dev-secret";
++  return createHash("sha256").update(secret).digest();
++}
++
++export function encryptSecret(plain: string): string {
++  if (!plain) return "";
++  const iv = randomBytes(12);
++  const cipher = createCipheriv("aes-256-gcm", key(), iv);
++  const enc = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
++  const tag = cipher.getAuthTag();
++  return Buffer.concat([iv, tag, enc]).toString("base64");
++}
++
++export function decryptSecret(payload: string): string {
++  if (!payload) return "";
++  const buf = Buffer.from(payload, "base64");
++  if (buf.length < 29) return "";
++  const iv = buf.subarray(0, 12);
++  const tag = buf.subarray(12, 28);
++  const enc = buf.subarray(28);
++  const decipher = createDecipheriv("aes-256-gcm", key(), iv);
++  decipher.setAuthTag(tag);
++  return Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8");
++}
+diff --git a/src/lib/settings-fn.ts b/src/lib/settings-fn.ts
+index 334340f..4d81a53 100644
+--- a/src/lib/settings-fn.ts
++++ b/src/lib/settings-fn.ts
+@@ -6,12 +6,19 @@ import { authMiddleware } from "@/lib/auth/middleware";
+ import { parseCdnBase, publicOrigin } from "@/lib/cdn";
+ import {
+   LP_A_RECORD_IP,
++  isCloudflareIp,
+   mergeDomainChoices,
+   normalizeLpHost,
+   parseLpDomainRecords,
+   type LpDomain,
+ } from "@/lib/lp-domains";
+ import { assertActiveStaff } from "@/lib/staff-fn";
++import { decryptSecret, encryptSecret } from "@/lib/secret";
++import { cpanelAddDomain, cpanelDeleteDomain, cpanelListDomains } from "@/lib/cpanel";
++import { execFile } from "node:child_process";
++import { promisify } from "node:util";
++
++const execFileAsync = promisify(execFile);
+ 
+ async function readSetting(key: string): Promise<string> {
+   const sql = await getSql();
+@@ -78,7 +85,8 @@ async function verifyHost(host: string): Promise<LpDomain> {
+   }
+   const expected = await expectedIps();
+   const hit = ips.some((ip) => expected.includes(ip));
+-  if (!hit) {
++  const viaCf = ips.some((ip) => isCloudflareIp(ip));
++  if (!hit && !viaCf) {
+     return {
+       host,
+       status: "pending",
+@@ -88,10 +96,46 @@ async function verifyHost(host: string): Promise<LpDomain> {
+   return {
+     host,
+     status: "active",
+-    detail: `Aktif · A ${ips.filter((ip) => expected.includes(ip)).join(", ")}`,
++    detail: viaCf && !hit
++      ? `Aktif · Cloudflare → origin ${LP_A_RECORD_IP}`
++      : `Aktif · A ${ips.filter((ip) => expected.includes(ip) || isCloudflareIp(ip)).join(", ")}`,
+   };
+ }
+ 
++async function writeSetting(key: string, value: string): Promise<void> {
++  const sql = await getSql();
++  await sql.query(
++    `insert into app_settings (key, value, updated_at)
++     values ($1, $2, now())
++     on conflict (key) do update set value = excluded.value, updated_at = now()`,
++    [key, value],
++  );
++}
++
++async function readCpanelConfig() {
++  const host = await readSetting("cpanel_host");
++  const user = await readSetting("cpanel_user");
++  const token = decryptSecret(await readSetting("cpanel_token"));
++  return { host, user, token };
++}
++
++async function attachProxy(host: string): Promise<string> {
++  const bin = process.env.KALIAREN_CONNECT_BIN?.trim() || "/usr/local/sbin/kaliaren-connect-domain";
++  try {
++    const { stdout, stderr } = await execFileAsync("sudo", ["-n", bin, host], {
++      timeout: 45000,
++      env: { ...process.env, KALIAREN_CPANEL_USER: "dewastoreid" },
++    });
++    return (stdout || stderr || "ok").trim();
++  } catch (err) {
++    const msg = err instanceof Error ? err.message : "proxy gagal";
++    if (msg.includes("ENOENT") || msg.includes("sudo")) {
++      return "";
++    }
++    return "";
 +  }
-+  const expected = await expectedIps();
-+  const hit = ips.some((ip) => expected.includes(ip));
-+  if (!hit) {
-+    return {
-+      host,
-+      status: "pending",
-+      detail: `DNS masih ${ips.join(", ")}. Ubah A record ke ${LP_A_RECORD_IP}`,
-+    };
-+  }
-+  return {
-+    host,
-+    status: "active",
-+    detail: `Aktif · A ${ips.filter((ip) => expected.includes(ip)).join(", ")}`,
-+  };
 +}
 +
  export async function resolveCdnBase(): Promise<string> {
    const custom = parseCdnBase(await readSetting("image_cdn"));
    if (custom && !custom.startsWith("weserv:")) return custom;
-@@ -67,11 +132,17 @@ export const listLpDomains = createServerFn({ method: "GET" })
-   .handler(async ({ context }) => {
-     await assertActiveStaff(context.userId);
+@@ -185,6 +229,24 @@ export const connectLpDomain = createServerFn({ method: "POST" })
      const primary = primaryHost();
--    const extra = parseLpDomains(await readSetting("lp_domains")).filter((h) => h !== primary);
-+    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
-+      (d) => d.host !== primary,
-+    );
-     return {
-       primary,
-       extra,
--      choices: mergeDomainChoices(primary, extra),
-+      extraHosts: extra.map((d) => d.host),
-+      choices: mergeDomainChoices(
-+        primary,
-+        extra.map((d) => d.host),
-+      ),
+     if (host === primary) throw new Error("Itu domain utama, tidak perlu ditambah");
+     const checked = await verifyHost(host);
++    const notes: string[] = [];
++    const cfg = await readCpanelConfig();
++    if (cfg.token) {
++      const added = await cpanelAddDomain(cfg, host);
++      notes.push(added.ok ? "cPanel: domain dibuat" : `cPanel: ${added.error}`);
++    } else {
++      notes.push("cPanel belum diisi di Pengaturan");
++    }
++    const proxy = await attachProxy(host);
++    if (proxy) notes.push("Proxy Apache: ok");
++    else notes.push("Proxy: belum. Pasang skrip sekali di VPS.");
++    if (checked.status === "active" && proxy) {
++      checked.detail = `Aktif · ${notes.join(" · ")}`;
++    } else if (checked.status === "active") {
++      checked.detail = `${checked.detail} · ${notes.join(" · ")}`;
++    } else {
++      checked.detail = `${checked.detail} · ${notes.join(" · ")}`;
++    }
+     const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
+       (d) => d.host !== primary && d.host !== host,
+     );
+@@ -228,3 +290,77 @@ export const refreshLpDomain = createServerFn({ method: "POST" })
+       ),
      };
    });
- 
-@@ -82,15 +153,78 @@ export const saveLpDomains = createServerFn({ method: "POST" })
-     const profile = await assertActiveStaff(context.userId);
-     if (profile.role !== "admin") throw new Error("Hanya admin yang bisa menambah domain");
-     const primary = primaryHost();
--    const extra = [...new Set(data.domains.map(normalizeLpHost).filter(Boolean))].filter(
-+    const existing = parseLpDomainRecords(await readSetting("lp_domains"));
-+    const wanted = [...new Set(data.domains.map(normalizeLpHost).filter(Boolean))].filter(
-       (h) => h !== primary,
-     );
--    const sql = await getSql();
--    await sql.query(
--      `insert into app_settings (key, value, updated_at)
--       values ('lp_domains', $1, now())
--       on conflict (key) do update set value = excluded.value, updated_at = now()`,
--      [JSON.stringify(extra)],
-+    const byHost = new Map(existing.map((d) => [d.host, d]));
-+    const extra: LpDomain[] = wanted.map(
-+      (host) => byHost.get(host) ?? { host, status: "pending", detail: "Belum dicek" },
-+    );
-+    await writeDomains(extra);
++
++export const getCpanelConfig = createServerFn({ method: "GET" })
++  .middleware([authMiddleware])
++  .handler(async ({ context }) => {
++    const profile = await assertActiveStaff(context.userId);
++    if (profile.role !== "admin") throw new Error("Hanya admin");
++    const cfg = await readCpanelConfig();
 +    return {
-+      ok: true as const,
-+      primary,
-+      extra,
-+      extraHosts: extra.map((d) => d.host),
-+      choices: mergeDomainChoices(
-+        primary,
-+        extra.map((d) => d.host),
-+      ),
++      host: cfg.host,
++      user: cfg.user,
++      hasToken: Boolean(cfg.token),
 +    };
 +  });
 +
-+export const connectLpDomain = createServerFn({ method: "POST" })
++export const saveCpanelConfig = createServerFn({ method: "POST" })
 +  .middleware([authMiddleware])
-+  .validator(z.object({ host: z.string().max(80) }))
++  .validator(
++    z.object({
++      host: z.string().max(120),
++      user: z.string().max(80),
++      token: z.string().max(300),
++    }),
++  )
 +  .handler(async ({ data, context }) => {
 +    const profile = await assertActiveStaff(context.userId);
-+    if (profile.role !== "admin") throw new Error("Hanya admin yang bisa menambah domain");
++    if (profile.role !== "admin") throw new Error("Hanya admin");
++    const host = data.host.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
++    await writeSetting("cpanel_host", host);
++    await writeSetting("cpanel_user", data.user.trim());
++    if (data.token.trim()) {
++      await writeSetting("cpanel_token", encryptSecret(data.token.trim()));
++    }
++    return { ok: true as const, host, user: data.user.trim() };
++  });
++
++export const testCpanel = createServerFn({ method: "POST" })
++  .middleware([authMiddleware])
++  .handler(async ({ context }) => {
++    const profile = await assertActiveStaff(context.userId);
++    if (profile.role !== "admin") throw new Error("Hanya admin");
++    const cfg = await readCpanelConfig();
++    const listed = await cpanelListDomains(cfg);
++    if (!listed.ok) return { ok: false as const, error: listed.error, domains: [] as string[] };
++    return { ok: true as const, error: "", domains: listed.data ?? [] };
++  });
++
++export const removeLpDomain = createServerFn({ method: "POST" })
++  .middleware([authMiddleware])
++  .validator(z.object({ host: z.string().max(80), deleteCpanel: z.boolean().optional() }))
++  .handler(async ({ data, context }) => {
++    const profile = await assertActiveStaff(context.userId);
++    if (profile.role !== "admin") throw new Error("Hanya admin");
 +    const host = normalizeLpHost(data.host);
-+    if (!host) throw new Error("Nama domain tidak valid");
 +    const primary = primaryHost();
-+    if (host === primary) throw new Error("Itu domain utama, tidak perlu ditambah");
-+    const checked = await verifyHost(host);
 +    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
-+      (d) => d.host !== primary && d.host !== host,
++      (d) => d.host !== host && d.host !== primary,
 +    );
-+    extra.push(checked);
 +    await writeDomains(extra);
++    if (data.deleteCpanel) {
++      const cfg = await readCpanelConfig();
++      if (cfg.token) await cpanelDeleteDomain(cfg, host);
++    }
 +    return {
 +      ok: true as const,
 +      primary,
-+      domain: checked,
 +      extra,
 +      extraHosts: extra.map((d) => d.host),
 +      choices: mergeDomainChoices(
@@ -239,211 +483,357 @@ index 26de9ae..334340f 100644
 +    };
 +  });
 +
-+export const refreshLpDomain = createServerFn({ method: "POST" })
-+  .middleware([authMiddleware])
-+  .validator(z.object({ host: z.string().max(80).optional() }))
-+  .handler(async ({ data, context }) => {
-+    await assertActiveStaff(context.userId);
-+    const primary = primaryHost();
-+    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
-+      (d) => d.host !== primary,
-     );
--    return { ok: true as const, primary, extra, choices: mergeDomainChoices(primary, extra) };
-+    const targets = data.host ? extra.filter((d) => d.host === normalizeLpHost(data.host ?? "")) : extra;
-+    const checked = await Promise.all(targets.map((d) => verifyHost(d.host)));
-+    const byHost = new Map(checked.map((d) => [d.host, d]));
-+    const next = extra.map((d) => byHost.get(d.host) ?? d);
-+    await writeDomains(next);
-+    return {
-+      ok: true as const,
-+      primary,
-+      extra: next,
-+      extraHosts: next.map((d) => d.host),
-+      choices: mergeDomainChoices(
-+        primary,
-+        next.map((d) => d.host),
-+      ),
-+    };
-   });
 diff --git a/src/routes/lp.index.tsx b/src/routes/lp.index.tsx
-index 42e9317..c6be551 100644
+index c6be551..56c30c6 100644
 --- a/src/routes/lp.index.tsx
 +++ b/src/routes/lp.index.tsx
-@@ -4,9 +4,9 @@ import { ExternalLink, Globe, Megaphone, Plus, Search, Trash2 } from "lucide-rea
- import { toast } from "sonner";
- import { createLanding, listLandings, listProductOptions } from "@/lib/lp-fn";
- import { listWarehouses } from "@/lib/inventory-fn";
--import { listLpDomains, saveLpDomains } from "@/lib/settings-fn";
-+import { listLpDomains, saveLpDomains, connectLpDomain, refreshLpDomain } from "@/lib/settings-fn";
- import type { LandingListItem, ProductOption } from "@/lib/lp";
--import { lpAdUrl } from "@/lib/lp-domains";
-+import { LP_A_RECORD_IP, lpAdUrl, type LpDomain } from "@/lib/lp-domains";
- import type { Warehouse } from "@/lib/inventory";
- import { useActiveWarehouse } from "@/lib/use-active-warehouse";
- import { angka, formatWaktu, rupiah } from "@/lib/utils";
-@@ -49,7 +49,7 @@ function LandingListPage() {
-   const [productQ, setProductQ] = useState("");
-   const [domainOpen, setDomainOpen] = useState(false);
-   const [primaryDomain, setPrimaryDomain] = useState("");
--  const [extraDomains, setExtraDomains] = useState<string[]>([]);
-+  const [extraDomains, setExtraDomains] = useState<LpDomain[]>([]);
-   const [newDomain, setNewDomain] = useState("");
-   const [domainPending, setDomainPending] = useState(false);
- 
-@@ -127,20 +127,24 @@ function LandingListPage() {
-   useEffect(() => {
-     if (!domainOpen) return;
-     listLpDomains()
--      .then((d) => {
-+      .then(async (d) => {
-         setPrimaryDomain(d.primary);
-         setExtraDomains(d.extra);
-+        if (d.extra.length > 0) {
-+          const saved = await refreshLpDomain({ data: {} });
-+          setPrimaryDomain(saved.primary);
-+          setExtraDomains(saved.extra);
-+        }
-       })
-       .catch((e: Error) => toast.error(e.message));
-   }, [domainOpen]);
- 
--  async function persistDomains(next: string[]) {
-+  async function persistDomains(nextHosts: string[]) {
-     setDomainPending(true);
-     try {
--      const saved = await saveLpDomains({ data: { domains: next } });
-+      const saved = await saveLpDomains({ data: { domains: nextHosts } });
-       setPrimaryDomain(saved.primary);
-       setExtraDomains(saved.extra);
--      toast.success("Domain disimpan");
-     } catch (err) {
-       toast.error(err instanceof Error ? err.message : "Gagal simpan domain");
-     } finally {
-@@ -152,8 +156,40 @@ function LandingListPage() {
-     e.preventDefault();
-     const host = newDomain.trim();
-     if (!host) return;
--    await persistDomains([...extraDomains, host]);
--    setNewDomain("");
-+    setDomainPending(true);
-+    try {
-+      const saved = await connectLpDomain({ data: { host } });
-+      setPrimaryDomain(saved.primary);
-+      setExtraDomains(saved.extra);
-+      setNewDomain("");
-+      if (saved.domain.status === "active") {
-+        toast.success(`${saved.domain.host} aktif`);
-+      } else {
-+        toast.error(saved.domain.detail);
-+      }
-+    } catch (err) {
-+      toast.error(err instanceof Error ? err.message : "Gagal cek domain");
-+    } finally {
-+      setDomainPending(false);
-+    }
-+  }
-+
-+  async function recheckDomain(host?: string) {
-+    setDomainPending(true);
-+    try {
-+      const saved = await refreshLpDomain({ data: { host } });
-+      setPrimaryDomain(saved.primary);
-+      setExtraDomains(saved.extra);
-+      const focus = host
-+        ? saved.extra.find((d) => d.host === host)
-+        : saved.extra[0];
-+      if (focus?.status === "active") toast.success(`${focus.host} aktif`);
-+      else if (focus) toast.error(focus.detail);
-+    } catch (err) {
-+      toast.error(err instanceof Error ? err.message : "Gagal cek domain");
-+    } finally {
-+      setDomainPending(false);
-+    }
-   }
- 
-   return (
-@@ -322,38 +358,63 @@ function LandingListPage() {
-                 <span className="ml-2 text-xs text-muted">utama</span>
-               </p>
-             ) : null}
--            {extraDomains.map((host) => (
-+            {extraDomains.map((d) => (
-               <div
--                key={host}
--                className="flex items-center justify-between gap-2 rounded-lg bg-bg px-3 py-2"
-+                key={d.host}
-+                className="flex items-start justify-between gap-2 rounded-lg bg-bg px-3 py-2"
-               >
--                <span className="font-mono text-sm break-all">{host}</span>
--                <Button
--                  type="button"
--                  variant="ghost"
--                  size="sm"
--                  disabled={domainPending}
--                  onClick={() => void persistDomains(extraDomains.filter((h) => h !== host))}
--                >
--                  <Trash2 className="size-4" />
--                </Button>
-+                <div className="min-w-0">
-+                  <p className="font-mono text-sm break-all">{d.host}</p>
-+                  <p
-+                    className={
-+                      d.status === "active"
-+                        ? "mt-0.5 text-xs text-ok"
-+                        : "mt-0.5 text-xs text-danger"
-+                    }
-+                  >
-+                    {d.status === "active" ? "Aktif" : "Belum aktif"}
-+                    {d.detail ? ` · ${d.detail}` : ""}
-+                  </p>
-+                </div>
-+                <div className="flex shrink-0 gap-1">
-+                  <Button
-+                    type="button"
-+                    variant="ghost"
-+                    size="sm"
-+                    disabled={domainPending}
-+                    onClick={() => void recheckDomain(d.host)}
-+                  >
-+                    Cek
-+                  </Button>
-+                  <Button
-+                    type="button"
-+                    variant="ghost"
-+                    size="sm"
-+                    disabled={domainPending}
-+                    onClick={() =>
-+                      void persistDomains(extraDomains.filter((x) => x.host !== d.host).map((x) => x.host))
-+                    }
-+                  >
-+                    <Trash2 className="size-4" />
-+                  </Button>
-+                </div>
-               </div>
-             ))}
-             <form onSubmit={(e) => void addDomain(e)} className="grid gap-2">
--              <Label htmlFor="new-domain">Tambah domain</Label>
-+              <Label htmlFor="new-domain">Konek domain baru</Label>
-               <Input
-                 id="new-domain"
-                 value={newDomain}
-                 onChange={(e) => setNewDomain(e.target.value)}
--                placeholder="promo.ahtagroup.com"
-+                placeholder="otiskosmetika.com"
-               />
-               <Button type="submit" disabled={domainPending || !newDomain.trim()}>
--                {domainPending ? "Menyimpan…" : "Tambah"}
-+                {domainPending ? "Mengecek DNS…" : "Verifikasi & tambah"}
+@@ -413,8 +413,11 @@ function LandingListPage() {
                </Button>
              </form>
              <p className="text-xs text-muted">
--              Setelah domain ditambah, di Cloudflare buat record A ke IP VPS, lalu di cPanel
--              buat domain itu (jangan share document root).
-+              Domain aktif jika record A mengarah ke {LP_A_RECORD_IP}. Lalu di cPanel buat
-+              domain itu (jangan share document root).
+-              Domain aktif jika record A mengarah ke {LP_A_RECORD_IP}. Lalu di cPanel buat
+-              domain itu (jangan share document root).
++              A record ke {LP_A_RECORD_IP}. Token cPanel dan tambah domain otomatis ada di{" "}
++              <Link to="/pengaturan" className="underline-offset-2 hover:underline">
++                Pengaturan
++              </Link>
++              .
              </p>
            </div>
          </DialogContent>
+diff --git a/src/routes/pengaturan.tsx b/src/routes/pengaturan.tsx
+new file mode 100644
+index 0000000..91d28c0
+--- /dev/null
++++ b/src/routes/pengaturan.tsx
+@@ -0,0 +1,327 @@
++import { createFileRoute, Link } from "@tanstack/react-router";
++import { useEffect, useState, type FormEvent } from "react";
++import { toast } from "sonner";
++import {
++  Plus,
++  RefreshCw,
++  Settings,
++  Trash2,
++  CheckCircle2,
++} from "lucide-react";
++import {
++  connectLpDomain,
++  getCpanelConfig,
++  listLpDomains,
++  refreshLpDomain,
++  removeLpDomain,
++  saveCpanelConfig,
++  testCpanel,
++} from "@/lib/settings-fn";
++import { LP_A_RECORD_IP, type LpDomain } from "@/lib/lp-domains";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Badge } from "@/components/ui/badge";
++import { Card, CardContent } from "@/components/ui/card";
++import { Skeleton } from "@/components/ui/skeleton";
++
++export const Route = createFileRoute("/pengaturan")({
++  component: SettingsPage,
++});
++
++function SettingsPage() {
++  const [primary, setPrimary] = useState("");
++  const [extra, setExtra] = useState<LpDomain[] | null>(null);
++  const [newHost, setNewHost] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [host, setHost] = useState("");
++  const [user, setUser] = useState("");
++  const [token, setToken] = useState("");
++  const [hasToken, setHasToken] = useState(false);
++  const [cpanelOk, setCpanelOk] = useState<boolean | null>(null);
++  const [cpanelDomains, setCpanelDomains] = useState<string[]>([]);
++  const [cpanelError, setCpanelError] = useState("");
++
++  function applyList(d: { primary: string; extra: LpDomain[] }) {
++    setPrimary(d.primary);
++    setExtra(d.extra);
++  }
++
++  useEffect(() => {
++    Promise.all([listLpDomains(), getCpanelConfig()])
++      .then(([domains, cfg]) => {
++        applyList(domains);
++        setHost(cfg.host);
++        setUser(cfg.user);
++        setHasToken(cfg.hasToken);
++      })
++      .catch((e: Error) => toast.error(e.message));
++  }, []);
++
++  async function saveCpanel(e: FormEvent) {
++    e.preventDefault();
++    setBusy(true);
++    try {
++      await saveCpanelConfig({ data: { host, user, token } });
++      setToken("");
++      setHasToken(hasToken || Boolean(token.trim()));
++      toast.success("Konfigurasi cPanel disimpan");
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : "Gagal simpan");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function pingCpanel() {
++    setBusy(true);
++    setCpanelError("");
++    try {
++      const res = await testCpanel();
++      setCpanelOk(res.ok);
++      setCpanelDomains(res.domains);
++      setCpanelError(res.error);
++      if (res.ok) toast.success(`Terhubung · ${res.domains.length} domain di cPanel`);
++      else toast.error(res.error);
++    } catch (err) {
++      setCpanelOk(false);
++      toast.error(err instanceof Error ? err.message : "Gagal tes");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function addHost(e: FormEvent) {
++    e.preventDefault();
++    if (!newHost.trim()) return;
++    setBusy(true);
++    try {
++      const saved = await connectLpDomain({ data: { host: newHost } });
++      applyList(saved);
++      setNewHost("");
++      if (saved.domain.status === "active") toast.success(`${saved.domain.host} aktif`);
++      else toast.error(saved.domain.detail);
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : "Gagal konek domain");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function recheck(hostName?: string) {
++    setBusy(true);
++    try {
++      const saved = await refreshLpDomain({ data: { host: hostName } });
++      applyList(saved);
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : "Gagal cek");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  async function remove(hostName: string) {
++    setBusy(true);
++    try {
++      const saved = await removeLpDomain({ data: { host: hostName } });
++      applyList(saved);
++      toast.success("Domain dihapus dari Kaliaren");
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : "Gagal hapus");
++    } finally {
++      setBusy(false);
++    }
++  }
++
++  return (
++    <div className="mx-auto flex max-w-6xl flex-col gap-6 pb-16">
++      <div>
++        <p className="text-xs font-medium tracking-[0.18em] text-muted uppercase">Admin</p>
++        <h1 className="mt-1 text-2xl font-semibold tracking-tight">Pengaturan cPanel</h1>
++        <p className="mt-1 text-sm text-muted">
++          Konek domain LP dari dasbor. Token hanya disimpan di server.
++        </p>
++      </div>
++
++      <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
++        <Card>
++          <CardContent className="grid gap-4 p-5">
++            <div className="flex items-center justify-between gap-3">
++              <div>
++                <p className="font-semibold">Kelola domain</p>
++                <p className="text-sm text-muted">Domain untuk landing page</p>
++              </div>
++            </div>
++
++            {primary ? (
++              <div className="flex items-center justify-between gap-2 rounded-lg bg-bg px-3 py-3">
++                <div className="min-w-0">
++                  <p className="font-mono text-sm">{primary}</p>
++                  <p className="text-xs text-muted">utama · admin/stok</p>
++                </div>
++                <Badge variant="aman">Aktif</Badge>
++              </div>
++            ) : null}
++
++            {extra == null ? (
++              <Skeleton className="h-24 rounded-lg" />
++            ) : extra.length === 0 ? (
++              <p className="text-sm text-muted">Belum ada domain iklan.</p>
++            ) : (
++              extra.map((d) => (
++                <div
++                  key={d.host}
++                  className="flex items-start justify-between gap-2 rounded-lg bg-bg px-3 py-3"
++                >
++                  <div className="min-w-0">
++                    <p className="font-mono text-sm break-all">{d.host}</p>
++                    <p className={d.status === "active" ? "text-xs text-ok" : "text-xs text-danger"}>
++                      {d.detail}
++                    </p>
++                  </div>
++                  <div className="flex shrink-0 items-center gap-1">
++                    <Badge variant={d.status === "active" ? "aman" : "default"}>
++                      {d.status === "active" ? "Aktif" : "Belum"}
++                    </Badge>
++                    <Button
++                      type="button"
++                      variant="ghost"
++                      size="sm"
++                      disabled={busy}
++                      onClick={() => void recheck(d.host)}
++                    >
++                      <RefreshCw className="size-4" />
++                    </Button>
++                    <Button
++                      type="button"
++                      variant="ghost"
++                      size="sm"
++                      disabled={busy}
++                      onClick={() => void remove(d.host)}
++                    >
++                      <Trash2 className="size-4" />
++                    </Button>
++                  </div>
++                </div>
++              ))
++            )}
++
++            <form onSubmit={(e) => void addHost(e)} className="grid gap-2 border-t border-border pt-4">
++              <Label htmlFor="add-host">Tambah domain LP</Label>
++              <div className="flex flex-col gap-2 sm:flex-row">
++                <Input
++                  id="add-host"
++                  value={newHost}
++                  onChange={(e) => setNewHost(e.target.value)}
++                  placeholder="cart.otiskosmetika.com"
++                />
++                <Button type="submit" disabled={busy || !newHost.trim()} className="sm:w-auto">
++                  <Plus className="size-4" />
++                  {busy ? "Mengecek…" : "Tambah"}
++                </Button>
++              </div>
++              <p className="text-xs text-muted">
++                A record ke {LP_A_RECORD_IP} (Cloudflare boleh proxied).
++              </p>
++            </form>
++          </CardContent>
++        </Card>
++
++        <div className="grid gap-5">
++          <Card>
++            <CardContent className="grid gap-4 p-5">
++              <div>
++                <p className="font-semibold">Konfigurasi cPanel</p>
++                <p className="text-sm text-muted">Supaya domain dibuat otomatis, tanpa WHM.</p>
++              </div>
++              <form onSubmit={(e) => void saveCpanel(e)} className="grid gap-3">
++                <div className="grid gap-1.5">
++                  <Label htmlFor="cp-host">cPanel host</Label>
++                  <Input
++                    id="cp-host"
++                    value={host}
++                    onChange={(e) => setHost(e.target.value)}
++                    placeholder="dewastoreid.com"
++                  />
++                </div>
++                <div className="grid gap-1.5">
++                  <Label htmlFor="cp-user">Username</Label>
++                  <Input
++                    id="cp-user"
++                    value={user}
++                    onChange={(e) => setUser(e.target.value)}
++                    placeholder="dewastoreid"
++                  />
++                </div>
++                <div className="grid gap-1.5">
++                  <Label htmlFor="cp-token">API token</Label>
++                  <Input
++                    id="cp-token"
++                    type="password"
++                    value={token}
++                    onChange={(e) => setToken(e.target.value)}
++                    placeholder={hasToken ? "Tersimpan · isi untuk ganti" : "Token cPanel"}
++                  />
++                  <p className="text-xs text-muted">
++                    cPanel → Security → Manage API Tokens. Token tidak dikirim ke browser lagi
++                    setelah disimpan.
++                  </p>
++                </div>
++                <div className="flex flex-wrap gap-2">
++                  <Button type="submit" disabled={busy}>
++                    <Settings className="size-4" />
++                    Simpan
++                  </Button>
++                  <Button type="button" variant="outline" disabled={busy} onClick={() => void pingCpanel()}>
++                    <RefreshCw className="size-4" />
++                    Tes koneksi
++                  </Button>
++                </div>
++              </form>
++            </CardContent>
++          </Card>
++
++          <Card>
++            <CardContent className="grid gap-3 p-5">
++              <div className="flex items-center justify-between">
++                <p className="font-semibold">Status koneksi</p>
++                {cpanelOk == null ? null : (
++                  <Badge variant={cpanelOk ? "aman" : "default"}>
++                    {cpanelOk ? "Terhubung" : "Gagal"}
++                  </Badge>
++                )}
++              </div>
++              {cpanelOk ? (
++                <p className="flex items-center gap-2 text-sm text-ok">
++                  <CheckCircle2 className="size-4" />
++                  Koneksi cPanel berhasil · {cpanelDomains.length} domain
++                </p>
++              ) : (
++                <p className="text-sm text-muted">
++                  {cpanelError || "Simpan token, lalu tes koneksi."}
++                </p>
++              )}
++              {cpanelDomains.length > 0 ? (
++                <ul className="grid gap-1 text-sm">
++                  {cpanelDomains.slice(0, 12).map((d) => (
++                    <li key={d} className="font-mono text-xs text-muted">
++                      {d}
++                    </li>
++                  ))}
++                </ul>
++              ) : null}
++            </CardContent>
++          </Card>
++        </div>
++      </div>
++
++      <p className="text-sm text-muted">
++        <Link to="/lp" className="underline-offset-2 hover:underline">
++          Kembali ke Landing
++        </Link>
++        <span className="mx-2">·</span>
++        Pilih domain di tiap LP lalu salin tautan iklan.
++      </p>
++    </div>
++  );
++}
 -- 
 2.39.5
 
