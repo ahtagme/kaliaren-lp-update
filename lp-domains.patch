@@ -1,24 +1,123 @@
-From ee5f39c81b796d93e40b64f6dce7a0aa487000b3 Mon Sep 17 00:00:00 2001
-From: Grok <grok-export@users.noreply.github.com>
-Date: Mon, 21 Sep 2026 12:22:01 +0000
-Subject: [PATCH] Make LP photos full-width and fail loudly when Grok has no
- API key.
-
-Hero and gallery images fill the phone column. Generate-from-photo reports missing XAI_API_KEY instead of silently using a template, and the key can be stored in Pengaturan.
----
- src/components/lp/lp-creative.tsx | 28 +++++------
- src/lib/lp-fn.ts                  | 20 +++++++-
- src/lib/settings-fn.ts            | 25 ++++++++++
- src/lib/xai.ts                    | 78 +++++++++++++++++++------------
- src/routes/pengaturan.tsx         | 49 ++++++++++++++++++-
- src/routes/stok.$id.tsx           | 10 ++--
- 6 files changed, 157 insertions(+), 53 deletions(-)
-
+diff --git a/src/components/lp/landing-view.tsx b/src/components/lp/landing-view.tsx
+index 7b6f919..a33332b 100644
+--- a/src/components/lp/landing-view.tsx
++++ b/src/components/lp/landing-view.tsx
+@@ -18,6 +18,20 @@ function FormBlock({
+   if (page.embed) {
+     return <OrderOnlineForm embed={page.embed} />;
+   }
++  if (page.checkoutUrl) {
++    return (
++      <div id="pesan" className="scroll-mt-3 px-4 py-2">
++        <a
++          href={page.checkoutUrl}
++          rel="noopener noreferrer"
++          onClick={() => trackLpCheckout()}
++          className="flex h-12 w-full items-center justify-center rounded-full bg-[#e11d2e] text-[15px] font-bold text-white uppercase"
++        >
++          Isi form pemesanan
++        </a>
++      </div>
++    );
++  }
+   return (
+     <div
+       id="pesan"
+@@ -64,22 +78,33 @@ export function LandingView({
+         productName={page.productName}
+         price={page.price}
+       />
+-      <div className={`lp w-full max-w-md bg-white ${page.embed ? "pb-24" : ""}`}>
+-        <LpCreative page={page} form={<FormBlock page={page} />} />
+-        {page.embed ? (
++      <div className={`lp w-full max-w-md bg-white ${page.embed || page.checkoutUrl ? "pb-24" : ""}`}>
++        <LpCreative page={page} form={page.checkoutUrl ? null : <FormBlock page={page} />} />
++        {page.embed || page.checkoutUrl ? (
+           <div className="fixed inset-x-0 bottom-0 z-40 border-t border-black/10 bg-white/95 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-sm">
+             <div className="mx-auto flex max-w-md items-center gap-3">
+               <div className="min-w-0 flex-1">
+                 <p className="truncate text-sm text-[#666]">{page.productName}</p>
+                 <p className="font-bold tabular-nums text-[#e11d2e]">{rupiah(page.price)}</p>
+               </div>
+-              <button
+-                type="button"
+-                onClick={scrollToForm}
+-                className="h-12 shrink-0 rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
+-              >
+-                {page.ctaPrimary || "PESAN"}
+-              </button>
++              {page.checkoutUrl ? (
++                <a
++                  href={page.checkoutUrl}
++                  rel="noopener noreferrer"
++                  onClick={() => trackLpCheckout()}
++                  className="grid h-12 shrink-0 place-items-center rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
++                >
++                  {page.ctaPrimary || "PESAN"}
++                </a>
++              ) : (
++                <button
++                  type="button"
++                  onClick={scrollToForm}
++                  className="h-12 shrink-0 rounded-full bg-[#e11d2e] px-5 text-[15px] font-bold text-white uppercase"
++                >
++                  {page.ctaPrimary || "PESAN"}
++                </button>
++              )}
+             </div>
+           </div>
+         ) : null}
 diff --git a/src/components/lp/lp-creative.tsx b/src/components/lp/lp-creative.tsx
-index 616e50d..3851e85 100644
+index 616e50d..f363a31 100644
 --- a/src/components/lp/lp-creative.tsx
 +++ b/src/components/lp/lp-creative.tsx
-@@ -139,14 +139,16 @@ export function LpCreative({
+@@ -38,16 +38,38 @@ function scrollToForm() {
+   scrollToLpForm();
+ }
+ 
+-function Cta({ label, pulse }: { label: string; pulse?: boolean }) {
+-  return (
+-    <button
+-      type="button"
+-      onClick={scrollToForm}
+-      className={`flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#e11d2e] text-[15px] font-bold tracking-wide text-white uppercase ${pulse ? "cta-pulse" : ""}`}
+-    >
++function Cta({
++  label,
++  pulse,
++  href,
++}: {
++  label: string;
++  pulse?: boolean;
++  href?: string;
++}) {
++  const className = `flex h-12 w-full items-center justify-center gap-2 rounded-full bg-[#e11d2e] text-[15px] font-bold tracking-wide text-white uppercase ${pulse ? "cta-pulse" : ""}`;
++  const inner = (
++    <>
+       <ShoppingCart className="size-5" />
+       {label}
+       <span className="text-lg leading-none">›</span>
++    </>
++  );
++  if (href) {
++    return (
++      <a
++        href={href}
++        className={className}
++        rel="noopener noreferrer"
++        onClick={() => trackLpCheckout()}
++      >
++        {inner}
++      </a>
++    );
++  }
++  return (
++    <button type="button" onClick={scrollToForm} className={className}>
++      {inner}
+     </button>
+   );
+ }
+@@ -139,14 +161,16 @@ export function LpCreative({
          </p>
  
          {hero ? (
@@ -43,7 +142,15 @@ index 616e50d..3851e85 100644
          ) : null}
  
          <h1 className="mt-4 text-center text-[26px] leading-[1.15] font-black tracking-tight text-balance uppercase">
-@@ -181,15 +183,15 @@ export function LpCreative({
+@@ -174,22 +198,22 @@ export function LpCreative({
+         </ul>
+ 
+         <div className="mt-4">
+-          <Cta label={cta1} />
++          <Cta label={cta1} href={page.checkoutUrl} />
+         </div>
+         {form ? <div className="mt-5">{form}</div> : null}
+ 
          {thumbs.length ? (
            <div className="mt-4 grid grid-cols-2 gap-2">
              {thumbs.map((src, i) => (
@@ -64,11 +171,26 @@ index 616e50d..3851e85 100644
                    {i === 0 ? "Masalahnya" : "Pakai rutin"}
                  </figcaption>
                </figure>
+@@ -334,7 +358,7 @@ export function LpCreative({
+           Jangan cuma lihat-lihat. Selagi ready, langsung checkout.
+         </p>
+         <div className="mt-4">
+-          <Cta label={cta2} pulse />
++          <Cta label={cta2} pulse href={page.checkoutUrl} />
+         </div>
+         <ul className="mt-4 flex flex-wrap justify-center gap-x-4 gap-y-1 text-[11px] text-white/75">
+           <li className="inline-flex items-center gap-1">
 diff --git a/src/lib/lp-fn.ts b/src/lib/lp-fn.ts
-index 2e38cfd..2d450e6 100644
+index 2e38cfd..12d9828 100644
 --- a/src/lib/lp-fn.ts
 +++ b/src/lib/lp-fn.ts
-@@ -22,6 +22,8 @@ import { grokExtremeCopy } from "@/lib/lp-ai";
+@@ -17,11 +17,13 @@ import {
+   type OrderStatus,
+   type ProductOption,
+ } from "@/lib/lp";
+-import { parseOrderOnlineEmbed } from "@/lib/orderonline";
++import { parseLpCheckout, parseOrderOnlineEmbed } from "@/lib/orderonline";
+ import { grokExtremeCopy } from "@/lib/lp-ai";
  import { parseMetaPixelId, parseTiktokPixelId } from "@/lib/lp-pixels";
  import { resolveCdnBase } from "@/lib/settings-fn";
  import { normalizeLpHost } from "@/lib/lp-domains";
@@ -77,7 +199,25 @@ index 2e38cfd..2d450e6 100644
  
  type LandingRow = {
    id: number;
-@@ -496,7 +498,17 @@ export const createLanding = createServerFn({ method: "POST" })
+@@ -100,6 +102,7 @@ function flag(value: unknown): boolean {
+ }
+ 
+ function mapLanding(r: LandingRow): LandingPage {
++  const checkout = parseLpCheckout(r.embed_code ?? "");
+   return {
+     id: r.id,
+     productId: r.product_id,
+@@ -126,7 +129,8 @@ function mapLanding(r: LandingRow): LandingPage {
+     formTitle: r.form_title,
+     formNote: r.form_note,
+     embedCode: r.embed_code ?? "",
+-    embed: parseOrderOnlineEmbed(r.embed_code ?? ""),
++    embed: checkout.embed,
++    checkoutUrl: checkout.checkoutUrl,
+     metaPixelId: r.meta_pixel_id ?? "",
+     tiktokPixelId: r.tiktok_pixel_id ?? "",
+     publicDomain: r.public_domain ?? "",
+@@ -496,7 +500,17 @@ export const createLanding = createServerFn({ method: "POST" })
      const cost = parseMoney(product.cost_price);
      const fallback = defaultLandingCopy(product.name, cost);
      const first = photos[0];
@@ -96,7 +236,7 @@ index 2e38cfd..2d450e6 100644
        ? await grokExtremeCopy({
            name: product.name,
            sku: product.sku,
-@@ -504,6 +516,9 @@ export const createLanding = createServerFn({ method: "POST" })
+@@ -504,6 +518,9 @@ export const createLanding = createServerFn({ method: "POST" })
            data: first.data,
          })
        : null;
@@ -106,7 +246,7 @@ index 2e38cfd..2d450e6 100644
      const copy = ai ? { ...fallback, ...ai } : fallback;
      const source = ai ? ("grok" as const) : ("template" as const);
  
-@@ -558,6 +573,7 @@ export const createLanding = createServerFn({ method: "POST" })
+@@ -558,6 +575,7 @@ export const createLanding = createServerFn({ method: "POST" })
          slug: existing[0].slug,
          reused: true as const,
          source,
@@ -114,7 +254,7 @@ index 2e38cfd..2d450e6 100644
        };
      }
  
-@@ -598,7 +614,7 @@ export const createLanding = createServerFn({ method: "POST" })
+@@ -598,7 +616,7 @@ export const createLanding = createServerFn({ method: "POST" })
      );
      const id = inserted[0]?.id;
      if (!id) throw new Error("Gagal membuat landing page");
@@ -123,6 +263,78 @@ index 2e38cfd..2d450e6 100644
    });
  
  export const updateLanding = createServerFn({ method: "POST" })
+@@ -607,10 +625,13 @@ export const updateLanding = createServerFn({ method: "POST" })
+   .handler(async ({ data, context }) => {
+     await assertActiveStaff(context.userId);
+     const embedCode = data.embedCode.trim();
+-    if (embedCode && !parseOrderOnlineEmbed(embedCode)) {
+-      throw new Error(
+-        "Kode embed OrderOnline tidak lengkap. Tempel kode utuh termasuk script.",
+-      );
++    if (embedCode) {
++      const parsed = parseLpCheckout(embedCode);
++      if (!parsed.embed && !parsed.checkoutUrl) {
++        throw new Error(
++          "Tempel embed OrderOnline, atau tautan checkout (https://...).",
++        );
++      }
+     }
+     const metaPixelId = parseMetaPixelId(data.metaPixelId);
+     if (data.metaPixelId.trim() && !metaPixelId) {
+diff --git a/src/lib/lp.ts b/src/lib/lp.ts
+index bb1fe94..99f8fde 100644
+--- a/src/lib/lp.ts
++++ b/src/lib/lp.ts
+@@ -55,6 +55,7 @@ export type LandingPage = {
+   formNote: string;
+   embedCode: string;
+   embed: OrderOnlineEmbed | null;
++  checkoutUrl?: string;
+   metaPixelId: string;
+   tiktokPixelId: string;
+   publicDomain: string;
+diff --git a/src/lib/orderonline.ts b/src/lib/orderonline.ts
+index 7f6876c..68cca5b 100644
+--- a/src/lib/orderonline.ts
++++ b/src/lib/orderonline.ts
+@@ -1,5 +1,5 @@
+-export const OO_JQUERY_SRC = "https://cdn.orderonline.id/js/vendor/jquery.min.js";
+ export const OO_EMBED_SRC = "https://cdn.orderonline.id/js/embed-v2-slim.min.js?v=8.0.2";
++export const OO_JQUERY_SRC = "https://cdn.orderonline.id/js/vendor/jquery.min.js";
+ 
+ export type OrderOnlineEmbed = {
+   username: string;
+@@ -81,3 +81,30 @@ export function orderOnlineBootScript(embed: OrderOnlineEmbed): string {
+   const q = JSON.stringify;
+   return `(function(){if(window.__ooBoot)return;window.__ooBoot=1;function n(){var o=window.ooe;if(o)return o;function e(){if(e.callMethod)e.callMethod.apply(e,arguments);else e.queue.push(arguments)}e.queue=[];e.loaded=true;e.version="8.0.2";e.push=e;window.ooe=e;window._ooe=e;return e}var o=n();o("setup","redirect",${q(embed.redirect)});o("init",${q(embed.storeId)},${q(embed.productId)},null,${q(embed.formId)},${JSON.stringify({ mode: embed.mode, action: embed.action, title: embed.title, triggerPixel: false, triggerGtm: false })});function add(src,id,cb){if(document.getElementById(id)){cb();return}var s=document.createElement("script");s.id=id;s.async=true;s.src=src;s.onload=cb;s.onerror=cb;document.head.appendChild(s)}add(${q(OO_JQUERY_SRC)},"oo-embed-jquery",function(){add(${q(OO_EMBED_SRC)},"oo-embed-js",function(){})})})();`;
+ }
++
++export function parseCheckoutUrl(raw: string): string {
++  const s = raw.trim();
++  if (!s || /orderonline-embed-form|ooe\s*\(/i.test(s)) return "";
++  const m =
++    s.match(/https?:\/\/[^\s"'<>]+/i) ||
++    s.match(/^(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}(?:\/\S*)?$/i);
++  if (!m) return "";
++  const href = m[0].startsWith("http") ? m[0] : `https://${m[0]}`;
++  try {
++    const u = new URL(href);
++    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
++    if (!u.hostname || u.hostname === "localhost") return "";
++    return u.toString();
++  } catch {
++    return "";
++  }
++}
++
++export function parseLpCheckout(raw: string): {
++  embed: OrderOnlineEmbed | null;
++  checkoutUrl: string;
++} {
++  const embed = parseOrderOnlineEmbed(raw);
++  if (embed) return { embed, checkoutUrl: "" };
++  return { embed: null, checkoutUrl: parseCheckoutUrl(raw) };
++}
 diff --git a/src/lib/settings-fn.ts b/src/lib/settings-fn.ts
 index 4d81a53..a0a2770 100644
 --- a/src/lib/settings-fn.ts
@@ -277,6 +489,78 @@ index a6ef934..cb9fdc9 100644
    if (!apiKey) return null;
    const ctrl = new AbortController();
    const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 90_000);
+diff --git a/src/routes/lp.$id.tsx b/src/routes/lp.$id.tsx
+index ef73c54..f33beba 100644
+--- a/src/routes/lp.$id.tsx
++++ b/src/routes/lp.$id.tsx
+@@ -8,7 +8,7 @@ import { listLpDomains } from "@/lib/settings-fn";
+ import type { LandingPage } from "@/lib/lp";
+ import { discountPercent } from "@/lib/lp";
+ import { lpAdUrl, mergeDomainChoices, normalizeLpHost } from "@/lib/lp-domains";
+-import { describeEmbed, parseOrderOnlineEmbed } from "@/lib/orderonline";
++import { describeEmbed, parseLpCheckout } from "@/lib/orderonline";
+ import { downloadNodeAsWebp } from "@/lib/export-webp";
+ import { LpCreative } from "@/components/lp/lp-creative";
+ import type { Warehouse } from "@/lib/inventory";
+@@ -245,8 +245,8 @@ function LandingEditorPage() {
+     setExporting(true);
+   }
+ 
+-  const parsedEmbed = useMemo(
+-    () => parseOrderOnlineEmbed(draft?.embedCode ?? ""),
++  const parsedCheckout = useMemo(
++    () => parseLpCheckout(draft?.embedCode ?? ""),
+     [draft?.embedCode],
+   );
+ 
+@@ -378,33 +378,37 @@ function LandingEditorPage() {
+       </fieldset>
+ 
+       <fieldset className="grid gap-3 rounded-xl bg-surface p-4 shadow-[var(--shadow-border)]">
+-        <legend className="px-1 text-sm font-semibold">Form OrderOnline</legend>
++        <legend className="px-1 text-sm font-semibold">Form / checkout</legend>
+         <p className="text-sm text-muted">
+-          Tempel kode embed dari OrderOnline untuk produk ini. Tiap LP form-nya
+-          sendiri.
++          Tempel embed OrderOnline, atau tautan checkout. Domain iklan sering
++          gagal embed — tautan lebih aman. Tombol PESAN mengarah ke tautan itu.
+         </p>
+-        <Label htmlFor="embed-code">Kode embed</Label>
++        <Label htmlFor="embed-code">Embed atau tautan</Label>
+         <Textarea
+           id="embed-code"
+-          className="min-h-40 font-mono text-xs"
++          className="min-h-28 font-mono text-xs"
+           value={draft.embedCode}
+           onChange={(e) => set("embedCode", e.target.value)}
+-          placeholder='<!-- OrderOnline Embed Code --> …'
++          placeholder={"https://ahtashop.orderonline.id/produk-kamu\natau kode embed OrderOnline"}
+           spellCheck={false}
+         />
+         {draft.embedCode.trim() ? (
+-          parsedEmbed ? (
++          parsedCheckout.embed ? (
+             <p className="text-sm text-ok">
+-              Siap: {describeEmbed(parsedEmbed)}
++              Embed siap: {describeEmbed(parsedCheckout.embed)}
++            </p>
++          ) : parsedCheckout.checkoutUrl ? (
++            <p className="text-sm text-ok">
++              Tombol PESAN → {parsedCheckout.checkoutUrl}
+             </p>
+           ) : (
+             <p className="text-sm text-danger">
+-              Kode belum lengkap. Tempel utuh, termasuk bagian script.
++              Bukan embed utuh dan bukan tautan https://
+             </p>
+           )
+         ) : (
+           <p className="text-xs text-muted">
+-            Kosong = LP tanpa form. Generate foto dulu, lalu tempel form di sini.
++            Kosong = LP tanpa checkout. Tempel tautan OrderOnline paling simpel.
+           </p>
+         )}
+       </fieldset>
 diff --git a/src/routes/pengaturan.tsx b/src/routes/pengaturan.tsx
 index 91d28c0..57fda0c 100644
 --- a/src/routes/pengaturan.tsx
@@ -387,6 +671,3 @@ index aad1c8a..8d8c694 100644
        navigate({ to: "/lp/$id", params: { id: String(created.id) } });
      } catch (err) {
        toast.error(err instanceof Error ? err.message : "Gagal generate LP");
--- 
-2.39.5
-
