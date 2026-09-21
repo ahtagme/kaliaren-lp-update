@@ -90,7 +90,7 @@ index 7b6f919..3b77893 100644
            </div>
          ) : null}
 diff --git a/src/components/lp/lp-creative.tsx b/src/components/lp/lp-creative.tsx
-index 616e50d..ec75ca9 100644
+index 616e50d..e219740 100644
 --- a/src/components/lp/lp-creative.tsx
 +++ b/src/components/lp/lp-creative.tsx
 @@ -38,16 +38,38 @@ function scrollToForm() {
@@ -139,7 +139,20 @@ index 616e50d..ec75ca9 100644
      </button>
    );
  }
-@@ -139,14 +161,16 @@ export function LpCreative({
+@@ -120,8 +142,10 @@ export function LpCreative({
+   const eduPhoto = extra[2] || "";
+   const benefits = (page.benefits.length
+     ? page.benefits
+-    : ["Stok gudang", "COD cek dulu", "Sisa terbatas", "Banyak yang ambil"]
+-  ).slice(0, 4);
++    : ["Stok gudang", "Barang sesuai foto", "Sisa terbatas", "Banyak yang ambil"]
++  )
++    .map((item) => item.replace(/COD\s*cek\s*dulu/gi, "Barang sesuai foto"))
++    .slice(0, 4);
+   const specs = (page.specs.length ? page.specs.map((s) => s.value) : LP_EDU).slice(0, 4);
+   const stories = (page.testimonials.length ? page.testimonials : LP_DEFAULT_TESTIMONIALS).slice(0, 3);
+   const headline = lpHeadline(page);
+@@ -139,14 +163,16 @@ export function LpCreative({
          </p>
  
          {hero ? (
@@ -164,7 +177,7 @@ index 616e50d..ec75ca9 100644
          ) : null}
  
          <h1 className="mt-4 text-center text-[26px] leading-[1.15] font-black tracking-tight text-balance uppercase">
-@@ -174,22 +198,22 @@ export function LpCreative({
+@@ -174,22 +200,22 @@ export function LpCreative({
          </ul>
  
          <div className="mt-4">
@@ -193,7 +206,7 @@ index 616e50d..ec75ca9 100644
                    {i === 0 ? "Masalahnya" : "Pakai rutin"}
                  </figcaption>
                </figure>
-@@ -200,7 +224,7 @@ export function LpCreative({
+@@ -200,7 +226,7 @@ export function LpCreative({
  
        <section className="px-4 py-6">
          <SectionTitle>Kenapa banyak dipilih?</SectionTitle>
@@ -202,7 +215,7 @@ index 616e50d..ec75ca9 100644
            {benefits.map((item, i) => {
              const Icon = WHY_ICONS[i] ?? Sparkles;
              return (
-@@ -334,7 +358,7 @@ export function LpCreative({
+@@ -334,7 +360,7 @@ export function LpCreative({
            Jangan cuma lihat-lihat. Selagi ready, langsung checkout.
          </p>
          <div className="mt-4">
@@ -347,6 +360,37 @@ index a51a2a0..a5e53a5 100644
      </div>
    );
  }
+diff --git a/src/lib/lp-copy.ts b/src/lib/lp-copy.ts
+index ec2d7e8..950e6fc 100644
+--- a/src/lib/lp-copy.ts
++++ b/src/lib/lp-copy.ts
+@@ -92,7 +92,7 @@ function detectAngle(name: string): Angle {
+     return {
+       problem: "KULIT MASIH BANDEL?",
+       punch: "JANGAN TUNDA PAKAI YANG BENAR",
+-      why: ["Pakai rutin", "Terasa ringan", "Stok gudang", "COD cek dulu"],
++      why: ["Pakai rutin", "Terasa ringan", "Stok gudang", "Barang sesuai foto"],
+       edu: [
+         "Pakai sesuai petunjuk. Rutin.",
+         "Bukan PHP. Barang fisik.",
+@@ -112,7 +112,7 @@ function detectAngle(name: string): Angle {
+     return {
+       problem: "MATA CEPAT LELAH?",
+       punch: "JANGAN PAKSA TANPA BANTUAN",
+-      why: ["Pakai nyaman", "Tampil rapi", "Stok terbatas", "COD cek dulu"],
++      why: ["Pakai nyaman", "Tampil rapi", "Stok terbatas", "Barang sesuai foto"],
+       edu: [
+         "Langsung terasa bedanya pas dipakai.",
+         "Cocok kerja dan jalan.",
+@@ -132,7 +132,7 @@ function detectAngle(name: string): Angle {
+   return {
+     problem: `${short.toUpperCase()} INI YANG LAGI DICARI`,
+     punch: "STOK FISIK. BUKAN PHP. YANG TELAT, KEHABISAN.",
+-    why: ["Stok gudang", "COD cek dulu", "Sisa terbatas", "Banyak yang ambil"],
++    why: ["Stok gudang", "Barang sesuai foto", "Sisa terbatas", "Banyak yang ambil"],
+     edu: [
+       "Stok dari gudang. Bukan foto temple.",
+       "Cek di kurir. Pas, bayar.",
 diff --git a/src/lib/lp-fn.ts b/src/lib/lp-fn.ts
 index 2e38cfd..12d9828 100644
 --- a/src/lib/lp-fn.ts
@@ -448,6 +492,21 @@ index 2e38cfd..12d9828 100644
      }
      const metaPixelId = parseMetaPixelId(data.metaPixelId);
      if (data.metaPixelId.trim() && !metaPixelId) {
+diff --git a/src/lib/lp-template.ts b/src/lib/lp-template.ts
+index 227cc0a..ef0295e 100644
+--- a/src/lib/lp-template.ts
++++ b/src/lib/lp-template.ts
+@@ -94,8 +94,8 @@ export function lpHeadline(page: LandingPage): string {
+ 
+ export function lpPunch(page: LandingPage): string {
+   const raw = page.subheadline?.trim();
+-  if (raw && !looksLikeCatalog(raw, page.productName)) return raw;
+-  return extremeCopyFor(page.productName).subheadline;
++  const text = raw && !looksLikeCatalog(raw, page.productName) ? raw : extremeCopyFor(page.productName).subheadline;
++  return text.replace(/COD\.?\s*cek dulu[^.]*(baru bayar)?\.?/gi, "BARANG SESUAI FOTO. SIAP KIRIM.");
+ }
+ 
+ function looksLikeCatalog(text: string, name: string): boolean {
 diff --git a/src/lib/lp.ts b/src/lib/lp.ts
 index bb1fe94..99f8fde 100644
 --- a/src/lib/lp.ts
