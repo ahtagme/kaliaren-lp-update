@@ -211,6 +211,142 @@ index 616e50d..ec75ca9 100644
          </div>
          <ul className="mt-4 flex flex-wrap justify-center gap-x-4 gap-y-1 text-[11px] text-white/75">
            <li className="inline-flex items-center gap-1">
+diff --git a/src/components/lp/orderonline-form.tsx b/src/components/lp/orderonline-form.tsx
+index a51a2a0..a5e53a5 100644
+--- a/src/components/lp/orderonline-form.tsx
++++ b/src/components/lp/orderonline-form.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useRef, useState } from "react";
+ import type { OrderOnlineEmbed } from "@/lib/orderonline";
+ import { OO_EMBED_SRC, OO_JQUERY_SRC, orderOnlineBootScript } from "@/lib/orderonline";
+-import { scrollToLpForm } from "@/lib/lp-pixels";
++import { scrollToLpForm, trackLpCheckout } from "@/lib/lp-pixels";
+ 
+ type OoeFn = {
+   (...args: unknown[]): void;
+@@ -65,8 +65,22 @@ function loadOrderOnlineScripts(): Promise<void> {
+   return scriptsPromise;
+ }
+ 
+-function formHasFields(root: HTMLElement | null) {
+-  return Boolean(root?.querySelector(".ooef-field-name, input[name='name']"));
++function formLooksReady(root: HTMLElement | null) {
++  if (!root) return false;
++  if (root.querySelector("input, textarea, select, iframe")) return true;
++  if (root.querySelector(".ooef-field-name, .ooef-form, .orderonline-embed-form > *")) return true;
++  return false;
++}
++
++function fitIframes(root: HTMLElement | null) {
++  if (!root) return;
++  root.querySelectorAll("iframe").forEach((frame) => {
++    frame.setAttribute("width", "100%");
++    frame.style.width = "100%";
++    frame.style.maxWidth = "100%";
++    frame.style.minHeight = "36rem";
++    frame.style.border = "0";
++  });
+ }
+ 
+ export function OrderOnlineForm({
+@@ -77,53 +91,58 @@ export function OrderOnlineForm({
+ }) {
+   const boxRef = useRef<HTMLDivElement>(null);
+   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
++  const checkout = embed.redirect || (embed.username ? `https://${embed.username}.orderonline.id` : "");
+ 
+   useEffect(() => {
+     let cancelled = false;
+-    let tries = 0;
++    const root = () => boxRef.current;
+     const markReady = () => {
+       if (cancelled) return;
++      fitIframes(root());
+       setStatus("ready");
+       if (window.__lpWantForm) scrollToLpForm();
+     };
+-    const poll = () => {
++    const check = () => {
+       if (cancelled) return;
+-      if (formHasFields(boxRef.current)) {
+-        markReady();
+-        return;
+-      }
+-      tries += 1;
+-      if (tries < 40) window.setTimeout(poll, 50);
++      if (formLooksReady(root())) markReady();
+     };
++    const mo = new MutationObserver(() => {
++      fitIframes(root());
++      check();
++    });
++    if (boxRef.current) {
++      mo.observe(boxRef.current, { childList: true, subtree: true, attributes: true });
++    }
+     loadOrderOnlineScripts()
+-      .then(() => {
+-        if (cancelled) return;
+-        poll();
+-      })
++      .then(check)
+       .catch(() => {
+         if (!cancelled) setStatus("error");
+       });
+-    poll();
++    const readyTimer = window.setTimeout(markReady, 2200);
++    const retry = window.setInterval(check, 400);
+     return () => {
+       cancelled = true;
++      mo.disconnect();
++      window.clearTimeout(readyTimer);
++      window.clearInterval(retry);
+     };
+   }, [embed.formId]);
+ 
+   return (
+-    <div id="pesan" ref={boxRef} className="scroll-mt-3">
+-      {status === "error" ? (
+-        <p className="py-6 text-center text-sm text-danger">
+-          Form tidak bisa dimuat. Muat ulang halaman.
+-        </p>
+-      ) : null}
++    <div id="pesan" ref={boxRef} className="lp-form scroll-mt-4">
+       {status === "loading" ? (
+         <div className="mb-3 grid gap-2" aria-hidden>
+-          <p className="text-[13px] font-bold">Data Penerima:</p>
+-          <div className="h-11 rounded-md bg-[#eee]" />
+-          <div className="h-11 rounded-md bg-[#eee]" />
++          <p className="text-[16px] font-bold">Data Penerima:</p>
++          <div className="h-12 rounded-md bg-[#eee]" />
++          <div className="h-12 rounded-md bg-[#eee]" />
+           <div className="h-24 rounded-md bg-[#eee]" />
+         </div>
+       ) : null}
++      {status === "error" ? (
++        <p className="py-3 text-center text-[15px] text-[#9a3428]">
++          Form belum tampil di HP ini.
++        </p>
++      ) : null}
+       <div className="ooef" suppressHydrationWarning>
+         <form
+           className="orderonline-embed-form"
+@@ -136,6 +155,16 @@ export function OrderOnlineForm({
+         />
+       </div>
+       <script dangerouslySetInnerHTML={{ __html: orderOnlineBootScript(embed) }} />
++      {checkout ? (
++        <a
++          href={checkout}
++          rel="noopener noreferrer"
++          onClick={() => trackLpCheckout()}
++          className="mt-4 flex h-12 min-h-11 w-full items-center justify-center rounded-full bg-[#111] text-[15px] font-bold text-white"
++        >
++          Jika form tidak muncul, isi di sini
++        </a>
++      ) : null}
+     </div>
+   );
+ }
 diff --git a/src/lib/lp-fn.ts b/src/lib/lp-fn.ts
 index 2e38cfd..12d9828 100644
 --- a/src/lib/lp-fn.ts
@@ -733,14 +869,67 @@ index aad1c8a..8d8c694 100644
      } catch (err) {
        toast.error(err instanceof Error ? err.message : "Gagal generate LP");
 diff --git a/src/styles.css b/src/styles.css
-index c88a040..0a51b21 100644
+index c88a040..b35be4a 100644
 --- a/src/styles.css
 +++ b/src/styles.css
-@@ -113,15 +113,46 @@
+@@ -111,17 +111,75 @@
+   animation: cta-pulse 1.8s ease-out infinite;
+ }
  
- .lp .ooef {
-   min-height: 22rem;
+-.lp .ooef {
+-  min-height: 22rem;
++.lp {
++  width: 100%;
++  max-width: 28rem;
++  overflow-x: clip;
++  background: #fff;
++  -webkit-text-size-adjust: 100%;
++  text-size-adjust: 100%;
++}
++
++html:has(.lp),
++body:has(.lp) {
++  overflow-x: clip;
 +  max-width: 100%;
++}
++
++.lp .ooef,
++.lp .lp-form {
++  width: 100%;
++  max-width: 100%;
++  overflow: visible;
++  min-height: 0;
++}
++
++.lp .ooef-loader {
++  display: none !important;
++}
++
++.lp .orderonline-embed-form,
++.lp .ooef form {
++  display: block;
++  width: 100%;
++}
++
++.lp .ooef iframe {
++  display: block;
++  width: 100% !important;
++  max-width: 100% !important;
++  min-height: 36rem;
++  border: 0;
++}
++
++.lp .ooef input,
++.lp .ooef textarea,
++.lp .ooef select,
++.lp .ooef button {
++  max-width: 100% !important;
++  box-sizing: border-box;
++  font-size: 16px !important;
++}
++
++.lp .ooef textarea {
++  min-height: 6rem;
  }
  
  .lp-creative {
@@ -749,21 +938,8 @@ index c88a040..0a51b21 100644
    background: #fff;
  }
  
- .lp {
-+  width: 100%;
-+  max-width: 28rem;
-+  overflow-x: hidden;
-   background: #fff;
-+  -webkit-text-size-adjust: 100%;
-+  text-size-adjust: 100%;
-+}
-+
-+html:has(.lp),
-+body:has(.lp) {
-+  overflow-x: hidden;
-+  max-width: 100%;
-+}
-+
+-.lp {
+-  background: #fff;
 +.lp img {
 +  max-width: 100%;
 +  height: auto;
@@ -773,13 +949,6 @@ index c88a040..0a51b21 100644
 +.lp button {
 +  touch-action: manipulation;
 +  -webkit-tap-highlight-color: transparent;
-+}
-+
-+.lp .ooef input,
-+.lp .ooef textarea,
-+.lp .ooef select {
-+  font-size: 16px !important;
-+  max-width: 100%;
  }
  
  .lp-creative .cta-pulse {
