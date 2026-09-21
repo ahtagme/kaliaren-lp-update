@@ -1,615 +1,449 @@
-From f4e725aa8e0fb7f6f7e34c9d5e6b335c8795a5cb Mon Sep 17 00:00:00 2001
+From f0847d671e46b1c02b45e08d6814c80af8b0a8db Mon Sep 17 00:00:00 2001
 From: Grok <grok-export@users.noreply.github.com>
-Date: Mon, 21 Sep 2026 10:37:22 +0000
-Subject: [PATCH] Add per-LP ad domain picker for campaign URLs.
+Date: Mon, 21 Sep 2026 11:04:08 +0000
+Subject: [PATCH] Verify ad domains via DNS before marking them active.
 
-Staff pick which connected hostname to use when copying a landing page link for ads. Extra domains are stored in settings; store.ahtagroup.com stays the primary.
+Adding a hostname looks up its A record against the VPS IP. Success only if DNS already points here; otherwise show the exact record to fix.
 ---
- migrations/0013_lp_domains.sql |   5 ++
- package.json                   |   2 +-
- scripts/copy-pglite-assets.mjs |  15 +++++
- src/lib/lp-domains.ts          |  50 +++++++++++++++
- src/lib/lp-fn.ts               |   9 ++-
- src/lib/lp-pixels.ts           |   1 +
- src/lib/lp.ts                  |   2 +
- src/lib/settings-fn.ts         |  46 ++++++++++++++
- src/routes/lp.$id.tsx          |  52 +++++++++++++---
- src/routes/lp.index.tsx        | 109 ++++++++++++++++++++++++++++++++-
- src/routes/pesanan.tsx         |   5 +-
- 11 files changed, 282 insertions(+), 14 deletions(-)
- create mode 100644 migrations/0013_lp_domains.sql
- create mode 100644 scripts/copy-pglite-assets.mjs
- create mode 100644 src/lib/lp-domains.ts
+ src/lib/lp-domains.ts   |  35 ++++++++-
+ src/lib/settings-fn.ts  | 156 +++++++++++++++++++++++++++++++++++++---
+ src/routes/lp.index.tsx | 115 ++++++++++++++++++++++-------
+ 3 files changed, 265 insertions(+), 41 deletions(-)
 
-diff --git a/migrations/0013_lp_domains.sql b/migrations/0013_lp_domains.sql
-new file mode 100644
-index 0000000..fae43a4
---- /dev/null
-+++ b/migrations/0013_lp_domains.sql
-@@ -0,0 +1,5 @@
-+alter table landing_pages add column if not exists public_domain text not null default '';
-+
-+insert into app_settings (key, value)
-+values ('lp_domains', '[]')
-+on conflict (key) do nothing;
-diff --git a/package.json b/package.json
-index 026d1c9..ef504b2 100644
---- a/package.json
-+++ b/package.json
-@@ -9,7 +9,7 @@
-   "scripts": {
-     "dev": "node scripts/with-app-env.mjs vite dev --host 0.0.0.0 --port 8080",
-     "build": "node scripts/with-app-env.mjs vite build && npm run db:migrate",
--    "build:vps": "NITRO_PRESET=node-server node scripts/with-app-env.mjs vite build && npm run db:migrate",
-+    "build:vps": "NITRO_PRESET=node-server node scripts/with-app-env.mjs vite build && node scripts/copy-pglite-assets.mjs && npm run db:migrate",
-     "start": "node .output/server/index.mjs",
-     "db:migrate": "node scripts/migrate.mjs",
-     "build:dev": "node scripts/with-app-env.mjs vite build --mode development",
-diff --git a/scripts/copy-pglite-assets.mjs b/scripts/copy-pglite-assets.mjs
-new file mode 100644
-index 0000000..25236d1
---- /dev/null
-+++ b/scripts/copy-pglite-assets.mjs
-@@ -0,0 +1,15 @@
-+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-+import { dirname, join } from "node:path";
-+import { fileURLToPath } from "node:url";
-+
-+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-+const src = join(root, "node_modules/@electric-sql/pglite/dist");
-+const dest = join(root, ".output/server/_libs");
-+
-+if (!existsSync(src) || !existsSync(join(root, ".output/server"))) process.exit(0);
-+mkdirSync(dest, { recursive: true });
-+
-+for (const name of readdirSync(src)) {
-+  if (!name.endsWith(".wasm") && !name.endsWith(".data")) continue;
-+  copyFileSync(join(src, name), join(dest, name));
-+}
 diff --git a/src/lib/lp-domains.ts b/src/lib/lp-domains.ts
-new file mode 100644
-index 0000000..a613dcd
---- /dev/null
+index a613dcd..35d00e7 100644
+--- a/src/lib/lp-domains.ts
 +++ b/src/lib/lp-domains.ts
-@@ -0,0 +1,50 @@
-+export function normalizeLpHost(raw: string): string {
-+  let s = raw.trim().toLowerCase();
-+  s = s.replace(/^https?:\/\//, "");
-+  s = s.replace(/\/.*$/, "");
-+  s = s.replace(/:\d+$/, "");
-+  s = s.replace(/\.$/, "");
-+  if (!s || s.length > 80) return "";
-+  if (s === "localhost") return s;
-+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(s)) {
-+    return "";
-+  }
-+  return s;
-+}
+@@ -1,3 +1,11 @@
++export type LpDomainStatus = "active" | "pending" | "invalid";
 +
-+export function parseLpDomains(raw: string): string[] {
-+  try {
-+    const parsed = JSON.parse(raw) as unknown;
-+    if (!Array.isArray(parsed)) return [];
-+    const seen = new Set<string>();
-+    const out: string[] = [];
-+    for (const item of parsed) {
-+      const host = normalizeLpHost(String(item ?? ""));
-+      if (!host || seen.has(host)) continue;
-+      seen.add(host);
-+      out.push(host);
-+    }
-+    return out;
-+  } catch {
-+    return [];
-+  }
-+}
++export type LpDomain = {
++  host: string;
++  status: LpDomainStatus;
++  detail: string;
++};
 +
-+export function lpAdUrl(host: string, slug: string): string {
-+  const h = normalizeLpHost(host);
-+  const path = `/p/${slug.replace(/^\/+/, "")}`;
-+  if (!h) return path;
-+  return `https://${h}${path}`;
-+}
-+
-+export function mergeDomainChoices(primary: string, extra: string[]): string[] {
-+  const seen = new Set<string>();
-+  const out: string[] = [];
-+  for (const host of [primary, ...extra]) {
-+    const h = normalizeLpHost(host);
-+    if (!h || seen.has(h)) continue;
-+    seen.add(h);
-+    out.push(h);
-+  }
-+  return out;
-+}
-diff --git a/src/lib/lp-fn.ts b/src/lib/lp-fn.ts
-index 53db27c..2e38cfd 100644
---- a/src/lib/lp-fn.ts
-+++ b/src/lib/lp-fn.ts
-@@ -21,6 +21,7 @@ import { parseOrderOnlineEmbed } from "@/lib/orderonline";
- import { grokExtremeCopy } from "@/lib/lp-ai";
- import { parseMetaPixelId, parseTiktokPixelId } from "@/lib/lp-pixels";
- import { resolveCdnBase } from "@/lib/settings-fn";
-+import { normalizeLpHost } from "@/lib/lp-domains";
- 
- type LandingRow = {
-   id: number;
-@@ -50,6 +51,7 @@ type LandingRow = {
-   embed_code: string;
-   meta_pixel_id: string;
-   tiktok_pixel_id: string;
-+  public_domain: string;
-   stock_qty: number | string | null;
-   order_count: number | string | null;
-   updated_at: string | Date;
-@@ -127,6 +129,7 @@ function mapLanding(r: LandingRow): LandingPage {
-     embed: parseOrderOnlineEmbed(r.embed_code ?? ""),
-     metaPixelId: r.meta_pixel_id ?? "",
-     tiktokPixelId: r.tiktok_pixel_id ?? "",
-+    publicDomain: r.public_domain ?? "",
-     stockQty: Number(r.stock_qty) || 0,
-     orderCount: Number(r.order_count) || 0,
-     updatedAt: iso(r.updated_at),
-@@ -165,7 +168,7 @@ const LANDING_SELECT = `
-          lp.price, lp.compare_at_price, lp.sold_count,
-          lp.cta_primary, lp.cta_secondary, lp.proofs, lp.testimonials,
-          lp.form_title, lp.form_note, lp.embed_code,
--         lp.meta_pixel_id, lp.tiktok_pixel_id, lp.updated_at,
-+         lp.meta_pixel_id, lp.tiktok_pixel_id, lp.public_domain, lp.updated_at,
-          coalesce(ws.qty, 0) as stock_qty,
-          (select count(*)::int from lp_orders o where o.landing_page_id = lp.id) as order_count,
-          (lp.poster_data is not null and length(lp.poster_data) > 80) as has_poster,
-@@ -234,6 +237,7 @@ const landingFields = {
-   embedCode: z.string().max(30000),
-   metaPixelId: z.string().max(4000),
-   tiktokPixelId: z.string().max(4000),
-+  publicDomain: z.string().max(80),
- };
- 
- export const getPublicLanding = createServerFn({ method: "GET" })
-@@ -377,6 +381,7 @@ export const listLandings = createServerFn({ method: "GET" })
-         sku: lp.sku,
-         slug: lp.slug,
-         isPublished: lp.isPublished,
-+        publicDomain: lp.publicDomain,
-         price: lp.price,
-         soldCount: lp.soldCount,
-         orderCount: lp.orderCount,
-@@ -641,6 +646,7 @@ export const updateLanding = createServerFn({ method: "POST" })
-          embed_code = $21,
-          meta_pixel_id = $22,
-          tiktok_pixel_id = $23,
-+         public_domain = $24,
-          updated_at = now()
-        where id = $1
-        returning id`,
-@@ -668,6 +674,7 @@ export const updateLanding = createServerFn({ method: "POST" })
-         embedCode,
-         metaPixelId,
-         tiktokPixelId,
-+        normalizeLpHost(data.publicDomain),
-       ],
-     );
-     if (!updated[0]) throw new Error("Landing page tidak ditemukan");
-diff --git a/src/lib/lp-pixels.ts b/src/lib/lp-pixels.ts
-index 6a764a8..c4c4b62 100644
---- a/src/lib/lp-pixels.ts
-+++ b/src/lib/lp-pixels.ts
-@@ -11,6 +11,7 @@ export function scrollToLpForm() {
-   };
-   go();
-   requestAnimationFrame(go);
-+  window.setTimeout(go, 80);
+ export function normalizeLpHost(raw: string): string {
+   let s = raw.trim().toLowerCase();
+   s = s.replace(/^https?:\/\//, "");
+@@ -13,16 +21,35 @@ export function normalizeLpHost(raw: string): string {
  }
  
- declare global {
-diff --git a/src/lib/lp.ts b/src/lib/lp.ts
-index dfdb7c0..bb1fe94 100644
---- a/src/lib/lp.ts
-+++ b/src/lib/lp.ts
-@@ -57,6 +57,7 @@ export type LandingPage = {
-   embed: OrderOnlineEmbed | null;
-   metaPixelId: string;
-   tiktokPixelId: string;
-+  publicDomain: string;
-   stockQty: number;
-   orderCount: number;
-   updatedAt: string;
-@@ -73,6 +74,7 @@ export type LandingListItem = {
-   sku: string;
-   slug: string;
-   isPublished: boolean;
-+  publicDomain: string;
-   price: number;
-   soldCount: number;
-   orderCount: number;
+ export function parseLpDomains(raw: string): string[] {
++  return parseLpDomainRecords(raw).map((d) => d.host);
++}
++
++export function parseLpDomainRecords(raw: string): LpDomain[] {
+   try {
+     const parsed = JSON.parse(raw) as unknown;
+     if (!Array.isArray(parsed)) return [];
+     const seen = new Set<string>();
+-    const out: string[] = [];
++    const out: LpDomain[] = [];
+     for (const item of parsed) {
+-      const host = normalizeLpHost(String(item ?? ""));
++      if (typeof item === "string") {
++        const host = normalizeLpHost(item);
++        if (!host || seen.has(host)) continue;
++        seen.add(host);
++        out.push({ host, status: "pending", detail: "Belum dicek" });
++        continue;
++      }
++      if (!item || typeof item !== "object") continue;
++      const rec = item as Partial<LpDomain>;
++      const host = normalizeLpHost(String(rec.host ?? ""));
+       if (!host || seen.has(host)) continue;
+       seen.add(host);
+-      out.push(host);
++      const status: LpDomainStatus =
++        rec.status === "active" || rec.status === "invalid" ? rec.status : "pending";
++      out.push({
++        host,
++        status,
++        detail: String(rec.detail ?? "").slice(0, 200),
++      });
+     }
+     return out;
+   } catch {
+@@ -48,3 +75,5 @@ export function mergeDomainChoices(primary: string, extra: string[]): string[] {
+   }
+   return out;
+ }
++
++export const LP_A_RECORD_IP = "45.76.179.245";
 diff --git a/src/lib/settings-fn.ts b/src/lib/settings-fn.ts
-index a4d2ec7..26de9ae 100644
+index 26de9ae..334340f 100644
 --- a/src/lib/settings-fn.ts
 +++ b/src/lib/settings-fn.ts
-@@ -3,6 +3,7 @@ import { z } from "zod";
+@@ -1,9 +1,16 @@
+ import { createServerFn } from "@tanstack/react-start";
++import { Resolver } from "node:dns/promises";
+ import { z } from "zod";
  import { getSql } from "@/lib/db";
  import { authMiddleware } from "@/lib/auth/middleware";
  import { parseCdnBase, publicOrigin } from "@/lib/cdn";
-+import { mergeDomainChoices, normalizeLpHost, parseLpDomains } from "@/lib/lp-domains";
+-import { mergeDomainChoices, normalizeLpHost, parseLpDomains } from "@/lib/lp-domains";
++import {
++  LP_A_RECORD_IP,
++  mergeDomainChoices,
++  normalizeLpHost,
++  parseLpDomainRecords,
++  type LpDomain,
++} from "@/lib/lp-domains";
  import { assertActiveStaff } from "@/lib/staff-fn";
  
  async function readSetting(key: string): Promise<string> {
-@@ -14,6 +15,18 @@ async function readSetting(key: string): Promise<string> {
-   return rows[0]?.value?.trim() ?? "";
+@@ -27,6 +34,64 @@ function primaryHost(): string {
+   return normalizeLpHost(publicOrigin()) || "store.ahtagroup.com";
  }
  
-+function primaryHost(): string {
-+  const raw = process.env.BETTER_AUTH_URL?.trim();
-+  if (raw) {
-+    try {
-+      return normalizeLpHost(new URL(raw).host);
-+    } catch {
-+      /* ignore */
-+    }
++async function writeDomains(records: LpDomain[]): Promise<void> {
++  const sql = await getSql();
++  await sql.query(
++    `insert into app_settings (key, value, updated_at)
++     values ('lp_domains', $1, now())
++     on conflict (key) do update set value = excluded.value, updated_at = now()`,
++    [JSON.stringify(records)],
++  );
++}
++
++async function resolveIps(host: string): Promise<string[]> {
++  const resolver = new Resolver();
++  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
++  const timer = setTimeout(() => resolver.cancel(), 4000);
++  try {
++    const ips = await resolver.resolve4(host);
++    return [...new Set(ips)];
++  } catch (err) {
++    const code = (err as NodeJS.ErrnoException).code;
++    if (code === "ENOTFOUND" || code === "ENODATA" || code === "CANCELLED") return [];
++    return [];
++  } finally {
++    clearTimeout(timer);
 +  }
-+  return normalizeLpHost(publicOrigin()) || "store.ahtagroup.com";
++}
++
++async function expectedIps(): Promise<string[]> {
++  const primary = primaryHost();
++  const ips = primary ? await resolveIps(primary) : [];
++  if (!ips.includes(LP_A_RECORD_IP)) ips.push(LP_A_RECORD_IP);
++  return ips;
++}
++
++async function verifyHost(host: string): Promise<LpDomain> {
++  const ips = await resolveIps(host);
++  if (ips.length === 0) {
++    return {
++      host,
++      status: "invalid",
++      detail: `Domain tidak ketemu di DNS. Pasang A record ke ${LP_A_RECORD_IP}`,
++    };
++  }
++  const expected = await expectedIps();
++  const hit = ips.some((ip) => expected.includes(ip));
++  if (!hit) {
++    return {
++      host,
++      status: "pending",
++      detail: `DNS masih ${ips.join(", ")}. Ubah A record ke ${LP_A_RECORD_IP}`,
++    };
++  }
++  return {
++    host,
++    status: "active",
++    detail: `Aktif · A ${ips.filter((ip) => expected.includes(ip)).join(", ")}`,
++  };
 +}
 +
  export async function resolveCdnBase(): Promise<string> {
    const custom = parseCdnBase(await readSetting("image_cdn"));
    if (custom && !custom.startsWith("weserv:")) return custom;
-@@ -48,3 +61,36 @@ export const setImageCdn = createServerFn({ method: "POST" })
-     );
-     return { ok: true as const, base };
+@@ -67,11 +132,17 @@ export const listLpDomains = createServerFn({ method: "GET" })
+   .handler(async ({ context }) => {
+     await assertActiveStaff(context.userId);
+     const primary = primaryHost();
+-    const extra = parseLpDomains(await readSetting("lp_domains")).filter((h) => h !== primary);
++    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
++      (d) => d.host !== primary,
++    );
+     return {
+       primary,
+       extra,
+-      choices: mergeDomainChoices(primary, extra),
++      extraHosts: extra.map((d) => d.host),
++      choices: mergeDomainChoices(
++        primary,
++        extra.map((d) => d.host),
++      ),
+     };
    });
-+
-+export const listLpDomains = createServerFn({ method: "GET" })
-+  .middleware([authMiddleware])
-+  .handler(async ({ context }) => {
-+    await assertActiveStaff(context.userId);
-+    const primary = primaryHost();
-+    const extra = parseLpDomains(await readSetting("lp_domains")).filter((h) => h !== primary);
+ 
+@@ -82,15 +153,78 @@ export const saveLpDomains = createServerFn({ method: "POST" })
+     const profile = await assertActiveStaff(context.userId);
+     if (profile.role !== "admin") throw new Error("Hanya admin yang bisa menambah domain");
+     const primary = primaryHost();
+-    const extra = [...new Set(data.domains.map(normalizeLpHost).filter(Boolean))].filter(
++    const existing = parseLpDomainRecords(await readSetting("lp_domains"));
++    const wanted = [...new Set(data.domains.map(normalizeLpHost).filter(Boolean))].filter(
+       (h) => h !== primary,
+     );
+-    const sql = await getSql();
+-    await sql.query(
+-      `insert into app_settings (key, value, updated_at)
+-       values ('lp_domains', $1, now())
+-       on conflict (key) do update set value = excluded.value, updated_at = now()`,
+-      [JSON.stringify(extra)],
++    const byHost = new Map(existing.map((d) => [d.host, d]));
++    const extra: LpDomain[] = wanted.map(
++      (host) => byHost.get(host) ?? { host, status: "pending", detail: "Belum dicek" },
++    );
++    await writeDomains(extra);
 +    return {
++      ok: true as const,
 +      primary,
 +      extra,
-+      choices: mergeDomainChoices(primary, extra),
++      extraHosts: extra.map((d) => d.host),
++      choices: mergeDomainChoices(
++        primary,
++        extra.map((d) => d.host),
++      ),
 +    };
 +  });
 +
-+export const saveLpDomains = createServerFn({ method: "POST" })
++export const connectLpDomain = createServerFn({ method: "POST" })
 +  .middleware([authMiddleware])
-+  .validator(z.object({ domains: z.array(z.string().max(80)).max(40) }))
++  .validator(z.object({ host: z.string().max(80) }))
 +  .handler(async ({ data, context }) => {
 +    const profile = await assertActiveStaff(context.userId);
 +    if (profile.role !== "admin") throw new Error("Hanya admin yang bisa menambah domain");
++    const host = normalizeLpHost(data.host);
++    if (!host) throw new Error("Nama domain tidak valid");
 +    const primary = primaryHost();
-+    const extra = [...new Set(data.domains.map(normalizeLpHost).filter(Boolean))].filter(
-+      (h) => h !== primary,
++    if (host === primary) throw new Error("Itu domain utama, tidak perlu ditambah");
++    const checked = await verifyHost(host);
++    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
++      (d) => d.host !== primary && d.host !== host,
 +    );
-+    const sql = await getSql();
-+    await sql.query(
-+      `insert into app_settings (key, value, updated_at)
-+       values ('lp_domains', $1, now())
-+       on conflict (key) do update set value = excluded.value, updated_at = now()`,
-+      [JSON.stringify(extra)],
-+    );
-+    return { ok: true as const, primary, extra, choices: mergeDomainChoices(primary, extra) };
++    extra.push(checked);
++    await writeDomains(extra);
++    return {
++      ok: true as const,
++      primary,
++      domain: checked,
++      extra,
++      extraHosts: extra.map((d) => d.host),
++      choices: mergeDomainChoices(
++        primary,
++        extra.map((d) => d.host),
++      ),
++    };
 +  });
-diff --git a/src/routes/lp.$id.tsx b/src/routes/lp.$id.tsx
-index 61ab100..ef73c54 100644
---- a/src/routes/lp.$id.tsx
-+++ b/src/routes/lp.$id.tsx
-@@ -4,8 +4,10 @@ import { toast } from "sonner";
- import { ArrowLeft, Copy, Download, ExternalLink } from "lucide-react";
- import { getLanding, updateLanding } from "@/lib/lp-fn";
- import { listWarehouses } from "@/lib/inventory-fn";
-+import { listLpDomains } from "@/lib/settings-fn";
- import type { LandingPage } from "@/lib/lp";
- import { discountPercent } from "@/lib/lp";
-+import { lpAdUrl, mergeDomainChoices, normalizeLpHost } from "@/lib/lp-domains";
- import { describeEmbed, parseOrderOnlineEmbed } from "@/lib/orderonline";
- import { downloadNodeAsWebp } from "@/lib/export-webp";
- import { LpCreative } from "@/components/lp/lp-creative";
-@@ -32,6 +34,7 @@ type Draft = {
-   warehouseId: string;
-   slug: string;
-   isPublished: boolean;
-+  publicDomain: string;
-   trustBanner: string;
-   headline: string;
-   subheadline: string;
-@@ -58,6 +61,7 @@ function toDraft(p: LandingPage): Draft {
-     warehouseId: String(p.warehouseId),
-     slug: p.slug,
-     isPublished: p.isPublished,
-+    publicDomain: p.publicDomain,
-     trustBanner: p.trustBanner,
-     headline: p.headline,
-     subheadline: p.subheadline,
-@@ -124,6 +128,8 @@ function LandingEditorPage() {
-   const landingId = Number(id);
-   const [page, setPage] = useState<LandingPage | null>(null);
-   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-+  const [domains, setDomains] = useState<string[]>([]);
-+  const [primaryDomain, setPrimaryDomain] = useState("");
-   const [draft, setDraft] = useState<Draft | null>(null);
-   const [error, setError] = useState<string | null>(null);
-   const [pending, setPending] = useState(false);
-@@ -134,11 +140,17 @@ function LandingEditorPage() {
-       setError("Landing page tidak ditemukan");
-       return;
-     }
--    Promise.all([getLanding({ data: { id: landingId } }), listWarehouses()])
--      .then(([lp, wh]) => {
-+    Promise.all([
-+      getLanding({ data: { id: landingId } }),
-+      listWarehouses(),
-+      listLpDomains(),
-+    ])
-+      .then(([lp, wh, dom]) => {
-         setPage(lp);
-         setDraft(toDraft(lp));
-         setWarehouses(wh);
-+        setPrimaryDomain(dom.primary);
-+        setDomains(dom.choices);
-       })
-       .catch((e: Error) => setError(e.message));
-   }, [landingId]);
-@@ -187,6 +199,7 @@ function LandingEditorPage() {
-           warehouseId: Number(draft.warehouseId),
-           slug: draft.slug.trim(),
-           isPublished: draft.isPublished,
-+          publicDomain: draft.publicDomain,
-           trustBanner: draft.trustBanner.trim(),
-           headline: draft.headline.trim(),
-           subheadline: draft.subheadline.trim(),
-@@ -240,8 +253,12 @@ function LandingEditorPage() {
-   if (error) return <p className="text-danger">{error}</p>;
-   if (!page || !draft) return <Skeleton className="h-80 rounded-xl" />;
- 
--  const publicPath = `/p/${draft.slug}`;
--  const origin = typeof window !== "undefined" ? window.location.origin : "";
-+  const hostChoices = mergeDomainChoices(
-+    draft.publicDomain || primaryDomain || (typeof window !== "undefined" ? window.location.host : ""),
-+    domains,
-+  );
-+  const adHost = normalizeLpHost(draft.publicDomain) || hostChoices[0] || "";
-+  const adUrl = lpAdUrl(adHost, draft.slug);
-   const disc = discountPercent(Number(draft.price) || 0, Number(draft.compareAtPrice) || 0);
- 
-   return (
-@@ -261,16 +278,16 @@ function LandingEditorPage() {
-       <div className="flex flex-wrap gap-2">
-         {draft.isPublished ? (
-           <Button type="button" variant="outline" asChild>
--            <Link to="/p/$slug" params={{ slug: draft.slug }}>
-+            <a href={adUrl} target="_blank" rel="noreferrer">
-               <ExternalLink className="size-4" />
-               Lihat LP
--            </Link>
-+            </a>
-           </Button>
-         ) : null}
-         <Button
-           type="button"
-           variant="outline"
--          onClick={() => copyText("Tautan", `${origin}${publicPath}`)}
-+          onClick={() => copyText("Tautan iklan", adUrl)}
-         >
-           <Copy className="size-4" />
-           Salin tautan
-@@ -319,10 +336,29 @@ function LandingEditorPage() {
-           />
-           Terbitkan (bisa dibuka publik)
-         </label>
-+        <div className="grid gap-1.5">
-+          <Label>Domain iklan</Label>
-+          <Select value={adHost} onValueChange={(v) => set("publicDomain", v)}>
-+            <SelectTrigger>
-+              <SelectValue placeholder="Pilih domain" />
-+            </SelectTrigger>
-+            <SelectContent>
-+              {hostChoices.map((host) => (
-+                <SelectItem key={host} value={host}>
-+                  {host}
-+                  {host === primaryDomain ? " · utama" : ""}
-+                </SelectItem>
-+              ))}
-+            </SelectContent>
-+          </Select>
-+          <p className="font-mono text-xs text-subtle break-all">{adUrl}</p>
-+          <p className="text-xs text-muted">
-+            Tautan ini yang dipakai di iklan. Domain lain ditambah dari daftar Landing.
-+          </p>
-+        </div>
-         <div className="grid gap-1.5">
-           <Label>Slug URL</Label>
-           <Input value={draft.slug} onChange={(e) => set("slug", e.target.value)} />
--          <p className="font-mono text-xs text-subtle">{publicPath}</p>
-         </div>
-         <div className="grid gap-1.5">
-           <Label>Potong stok dari</Label>
++
++export const refreshLpDomain = createServerFn({ method: "POST" })
++  .middleware([authMiddleware])
++  .validator(z.object({ host: z.string().max(80).optional() }))
++  .handler(async ({ data, context }) => {
++    await assertActiveStaff(context.userId);
++    const primary = primaryHost();
++    const extra = parseLpDomainRecords(await readSetting("lp_domains")).filter(
++      (d) => d.host !== primary,
+     );
+-    return { ok: true as const, primary, extra, choices: mergeDomainChoices(primary, extra) };
++    const targets = data.host ? extra.filter((d) => d.host === normalizeLpHost(data.host ?? "")) : extra;
++    const checked = await Promise.all(targets.map((d) => verifyHost(d.host)));
++    const byHost = new Map(checked.map((d) => [d.host, d]));
++    const next = extra.map((d) => byHost.get(d.host) ?? d);
++    await writeDomains(next);
++    return {
++      ok: true as const,
++      primary,
++      extra: next,
++      extraHosts: next.map((d) => d.host),
++      choices: mergeDomainChoices(
++        primary,
++        next.map((d) => d.host),
++      ),
++    };
+   });
 diff --git a/src/routes/lp.index.tsx b/src/routes/lp.index.tsx
-index 8be4f2b..42e9317 100644
+index 42e9317..c6be551 100644
 --- a/src/routes/lp.index.tsx
 +++ b/src/routes/lp.index.tsx
-@@ -1,10 +1,12 @@
- import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
- import { useEffect, useMemo, useState, type FormEvent } from "react";
--import { ExternalLink, Megaphone, Plus, Search } from "lucide-react";
-+import { ExternalLink, Globe, Megaphone, Plus, Search, Trash2 } from "lucide-react";
+@@ -4,9 +4,9 @@ import { ExternalLink, Globe, Megaphone, Plus, Search, Trash2 } from "lucide-rea
  import { toast } from "sonner";
  import { createLanding, listLandings, listProductOptions } from "@/lib/lp-fn";
  import { listWarehouses } from "@/lib/inventory-fn";
-+import { listLpDomains, saveLpDomains } from "@/lib/settings-fn";
+-import { listLpDomains, saveLpDomains } from "@/lib/settings-fn";
++import { listLpDomains, saveLpDomains, connectLpDomain, refreshLpDomain } from "@/lib/settings-fn";
  import type { LandingListItem, ProductOption } from "@/lib/lp";
-+import { lpAdUrl } from "@/lib/lp-domains";
+-import { lpAdUrl } from "@/lib/lp-domains";
++import { LP_A_RECORD_IP, lpAdUrl, type LpDomain } from "@/lib/lp-domains";
  import type { Warehouse } from "@/lib/inventory";
  import { useActiveWarehouse } from "@/lib/use-active-warehouse";
  import { angka, formatWaktu, rupiah } from "@/lib/utils";
-@@ -45,6 +47,11 @@ function LandingListPage() {
-   const [warehouseId, setWarehouseId] = useState<string>("");
-   const [pending, setPending] = useState(false);
+@@ -49,7 +49,7 @@ function LandingListPage() {
    const [productQ, setProductQ] = useState("");
-+  const [domainOpen, setDomainOpen] = useState(false);
-+  const [primaryDomain, setPrimaryDomain] = useState("");
-+  const [extraDomains, setExtraDomains] = useState<string[]>([]);
-+  const [newDomain, setNewDomain] = useState("");
-+  const [domainPending, setDomainPending] = useState(false);
+   const [domainOpen, setDomainOpen] = useState(false);
+   const [primaryDomain, setPrimaryDomain] = useState("");
+-  const [extraDomains, setExtraDomains] = useState<string[]>([]);
++  const [extraDomains, setExtraDomains] = useState<LpDomain[]>([]);
+   const [newDomain, setNewDomain] = useState("");
+   const [domainPending, setDomainPending] = useState(false);
  
-   async function reload() {
-     const data = await listLandings();
-@@ -52,7 +59,10 @@ function LandingListPage() {
-   }
- 
+@@ -127,20 +127,24 @@ function LandingListPage() {
    useEffect(() => {
--    reload().catch((e: Error) => toast.error(e.message));
-+    reload().catch((e: Error) => {
-+      if (e.message === "Unauthorized") return;
-+      toast.error(e.message);
-+    });
-   }, []);
+     if (!domainOpen) return;
+     listLpDomains()
+-      .then((d) => {
++      .then(async (d) => {
+         setPrimaryDomain(d.primary);
+         setExtraDomains(d.extra);
++        if (d.extra.length > 0) {
++          const saved = await refreshLpDomain({ data: {} });
++          setPrimaryDomain(saved.primary);
++          setExtraDomains(saved.extra);
++        }
+       })
+       .catch((e: Error) => toast.error(e.message));
+   }, [domainOpen]);
  
-   useEffect(() => {
-@@ -114,6 +124,38 @@ function LandingListPage() {
-     }
-   }
- 
-+  useEffect(() => {
-+    if (!domainOpen) return;
-+    listLpDomains()
-+      .then((d) => {
-+        setPrimaryDomain(d.primary);
-+        setExtraDomains(d.extra);
-+      })
-+      .catch((e: Error) => toast.error(e.message));
-+  }, [domainOpen]);
-+
-+  async function persistDomains(next: string[]) {
+-  async function persistDomains(next: string[]) {
++  async function persistDomains(nextHosts: string[]) {
+     setDomainPending(true);
+     try {
+-      const saved = await saveLpDomains({ data: { domains: next } });
++      const saved = await saveLpDomains({ data: { domains: nextHosts } });
+       setPrimaryDomain(saved.primary);
+       setExtraDomains(saved.extra);
+-      toast.success("Domain disimpan");
+     } catch (err) {
+       toast.error(err instanceof Error ? err.message : "Gagal simpan domain");
+     } finally {
+@@ -152,8 +156,40 @@ function LandingListPage() {
+     e.preventDefault();
+     const host = newDomain.trim();
+     if (!host) return;
+-    await persistDomains([...extraDomains, host]);
+-    setNewDomain("");
 +    setDomainPending(true);
 +    try {
-+      const saved = await saveLpDomains({ data: { domains: next } });
++      const saved = await connectLpDomain({ data: { host } });
 +      setPrimaryDomain(saved.primary);
 +      setExtraDomains(saved.extra);
-+      toast.success("Domain disimpan");
++      setNewDomain("");
++      if (saved.domain.status === "active") {
++        toast.success(`${saved.domain.host} aktif`);
++      } else {
++        toast.error(saved.domain.detail);
++      }
 +    } catch (err) {
-+      toast.error(err instanceof Error ? err.message : "Gagal simpan domain");
++      toast.error(err instanceof Error ? err.message : "Gagal cek domain");
 +    } finally {
 +      setDomainPending(false);
 +    }
 +  }
 +
-+  async function addDomain(e: FormEvent) {
-+    e.preventDefault();
-+    const host = newDomain.trim();
-+    if (!host) return;
-+    await persistDomains([...extraDomains, host]);
-+    setNewDomain("");
-+  }
-+
++  async function recheckDomain(host?: string) {
++    setDomainPending(true);
++    try {
++      const saved = await refreshLpDomain({ data: { host } });
++      setPrimaryDomain(saved.primary);
++      setExtraDomains(saved.extra);
++      const focus = host
++        ? saved.extra.find((d) => d.host === host)
++        : saved.extra[0];
++      if (focus?.status === "active") toast.success(`${focus.host} aktif`);
++      else if (focus) toast.error(focus.detail);
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : "Gagal cek domain");
++    } finally {
++      setDomainPending(false);
++    }
+   }
+ 
    return (
-     <div className="mx-auto flex max-w-5xl flex-col gap-5">
-       <div className="flex flex-wrap items-start justify-between gap-3">
-@@ -123,10 +165,16 @@ function LandingListPage() {
-             Halaman jual COD per produk. Form pesanan langsung potong stok gudang.
-           </p>
-         </div>
-+        <div className="flex flex-wrap gap-2">
-+        <Button variant="outline" onClick={() => setDomainOpen(true)} className="shrink-0">
-+          <Globe className="size-4" />
-+          Domain iklan
-+        </Button>
-         <Button onClick={() => setOpen(true)} className="shrink-0">
-           <Plus className="size-4" />
-           Buat LP
-         </Button>
-+        </div>
-       </div>
- 
-       <div className="relative">
-@@ -164,7 +212,10 @@ function LandingListPage() {
-                   <div className="min-w-0">
-                     <p className="font-semibold tracking-tight">{r.productName}</p>
-                     <p className="mt-0.5 font-mono text-xs text-muted">
--                      /p/{r.slug} · {r.sku}
-+                      {r.publicDomain
-+                        ? lpAdUrl(r.publicDomain, r.slug).replace(/^https:\/\//, "")
-+                        : `/p/${r.slug}`}{" "}
-+                      · {r.sku}
-                     </p>
-                   </div>
-                   <Badge variant={r.isPublished ? "aman" : "default"}>
-@@ -255,6 +306,58 @@ function LandingListPage() {
-           </form>
+@@ -322,38 +358,63 @@ function LandingListPage() {
+                 <span className="ml-2 text-xs text-muted">utama</span>
+               </p>
+             ) : null}
+-            {extraDomains.map((host) => (
++            {extraDomains.map((d) => (
+               <div
+-                key={host}
+-                className="flex items-center justify-between gap-2 rounded-lg bg-bg px-3 py-2"
++                key={d.host}
++                className="flex items-start justify-between gap-2 rounded-lg bg-bg px-3 py-2"
+               >
+-                <span className="font-mono text-sm break-all">{host}</span>
+-                <Button
+-                  type="button"
+-                  variant="ghost"
+-                  size="sm"
+-                  disabled={domainPending}
+-                  onClick={() => void persistDomains(extraDomains.filter((h) => h !== host))}
+-                >
+-                  <Trash2 className="size-4" />
+-                </Button>
++                <div className="min-w-0">
++                  <p className="font-mono text-sm break-all">{d.host}</p>
++                  <p
++                    className={
++                      d.status === "active"
++                        ? "mt-0.5 text-xs text-ok"
++                        : "mt-0.5 text-xs text-danger"
++                    }
++                  >
++                    {d.status === "active" ? "Aktif" : "Belum aktif"}
++                    {d.detail ? ` · ${d.detail}` : ""}
++                  </p>
++                </div>
++                <div className="flex shrink-0 gap-1">
++                  <Button
++                    type="button"
++                    variant="ghost"
++                    size="sm"
++                    disabled={domainPending}
++                    onClick={() => void recheckDomain(d.host)}
++                  >
++                    Cek
++                  </Button>
++                  <Button
++                    type="button"
++                    variant="ghost"
++                    size="sm"
++                    disabled={domainPending}
++                    onClick={() =>
++                      void persistDomains(extraDomains.filter((x) => x.host !== d.host).map((x) => x.host))
++                    }
++                  >
++                    <Trash2 className="size-4" />
++                  </Button>
++                </div>
+               </div>
+             ))}
+             <form onSubmit={(e) => void addDomain(e)} className="grid gap-2">
+-              <Label htmlFor="new-domain">Tambah domain</Label>
++              <Label htmlFor="new-domain">Konek domain baru</Label>
+               <Input
+                 id="new-domain"
+                 value={newDomain}
+                 onChange={(e) => setNewDomain(e.target.value)}
+-                placeholder="promo.ahtagroup.com"
++                placeholder="otiskosmetika.com"
+               />
+               <Button type="submit" disabled={domainPending || !newDomain.trim()}>
+-                {domainPending ? "Menyimpan…" : "Tambah"}
++                {domainPending ? "Mengecek DNS…" : "Verifikasi & tambah"}
+               </Button>
+             </form>
+             <p className="text-xs text-muted">
+-              Setelah domain ditambah, di Cloudflare buat record A ke IP VPS, lalu di cPanel
+-              buat domain itu (jangan share document root).
++              Domain aktif jika record A mengarah ke {LP_A_RECORD_IP}. Lalu di cPanel buat
++              domain itu (jangan share document root).
+             </p>
+           </div>
          </DialogContent>
-       </Dialog>
-+
-+      <Dialog open={domainOpen} onOpenChange={setDomainOpen}>
-+        <DialogContent>
-+          <DialogHeader>
-+            <DialogTitle>Domain iklan</DialogTitle>
-+            <DialogDescription>
-+              Pilih domain ini saat buat LP. Domain harus mengarah ke server yang sama.
-+            </DialogDescription>
-+          </DialogHeader>
-+          <div className="grid gap-3">
-+            {primaryDomain ? (
-+              <p className="rounded-lg bg-bg px-3 py-2 font-mono text-sm">
-+                {primaryDomain}
-+                <span className="ml-2 text-xs text-muted">utama</span>
-+              </p>
-+            ) : null}
-+            {extraDomains.map((host) => (
-+              <div
-+                key={host}
-+                className="flex items-center justify-between gap-2 rounded-lg bg-bg px-3 py-2"
-+              >
-+                <span className="font-mono text-sm break-all">{host}</span>
-+                <Button
-+                  type="button"
-+                  variant="ghost"
-+                  size="sm"
-+                  disabled={domainPending}
-+                  onClick={() => void persistDomains(extraDomains.filter((h) => h !== host))}
-+                >
-+                  <Trash2 className="size-4" />
-+                </Button>
-+              </div>
-+            ))}
-+            <form onSubmit={(e) => void addDomain(e)} className="grid gap-2">
-+              <Label htmlFor="new-domain">Tambah domain</Label>
-+              <Input
-+                id="new-domain"
-+                value={newDomain}
-+                onChange={(e) => setNewDomain(e.target.value)}
-+                placeholder="promo.ahtagroup.com"
-+              />
-+              <Button type="submit" disabled={domainPending || !newDomain.trim()}>
-+                {domainPending ? "Menyimpan…" : "Tambah"}
-+              </Button>
-+            </form>
-+            <p className="text-xs text-muted">
-+              Setelah domain ditambah, di Cloudflare buat record A ke IP VPS, lalu di cPanel
-+              buat domain itu (jangan share document root).
-+            </p>
-+          </div>
-+        </DialogContent>
-+      </Dialog>
-     </div>
-   );
- }
-diff --git a/src/routes/pesanan.tsx b/src/routes/pesanan.tsx
-index 2efe066..f97429c 100644
---- a/src/routes/pesanan.tsx
-+++ b/src/routes/pesanan.tsx
-@@ -38,7 +38,10 @@ function OrdersPage() {
- 
-   useEffect(() => {
-     setRows(null);
--    reload(status).catch((e: Error) => toast.error(e.message));
-+    reload(status).catch((e: Error) => {
-+      if (e.message === "Unauthorized") return;
-+      toast.error(e.message);
-+    });
-   }, [status]);
- 
-   async function changeStatus(id: number, next: OrderStatus) {
 -- 
 2.39.5
 
